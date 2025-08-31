@@ -1,27 +1,51 @@
 // src/routes/payfastNotify.js
 import express from 'express';
 import Ride from '../models/Ride.js';
+import Rider from '../models/Rider.js';
 import { riderEvents } from '../bots/riderBot.js';
-import { riderBot as RB } from '../bots/riderBot.js';   // <— add this import
-
-const router = express.Router();
+import { sendPaymentReceiptEmail } from '../services/mailer.js';
 
 /**
- * PayFast IPN (server-to-server).
- * Requires app.use(express.urlencoded({ extended:true })) BEFORE this route.
+ * IMPORTANT (in your main server file):
+ * app.use(express.urlencoded({ extended: true }));
+ * so PayFast/x-www-form-urlencoded bodies populate req.body
  */
+const router = express.Router();
+
 router.post('/notify', async (req, res) => {
   try {
     const body = req.body || {};
+
+    // PayFast sends m_payment_id — we also accept partnerId/rideId for safety
     const rideId = body.m_payment_id || body.partnerId || body.rideId || null;
     if (!rideId) return res.status(400).send('Missing ride ID');
 
     const ride = await Ride.findById(rideId);
     if (!ride) return res.status(404).send('Ride not found');
 
+    // Minimal status check (PayFast: "COMPLETE")
     const status = String(body.payment_status || '').toUpperCase();
     if (!['COMPLETE', 'COMPLETE_PAYMENT', 'PAID'].includes(status)) {
+      // Still OK to return 200 so PayFast doesn't retry excessively
       return res.status(200).send('IGNORED');
+    }
+
+    // Payer email (PayFast payload uses 'email_address')
+    let payerEmail =
+      (body.email_address && String(body.email_address).trim()) ||
+      (body.email && String(body.email).trim()) ||
+      '';
+
+    // If we're missing an email (e.g., mocked payload), look up rider
+    if (!payerEmail) {
+      let riderDoc = null;
+      if (ride.riderChatId) {
+        riderDoc = await Rider.findOne({ chatId: ride.riderChatId });
+      }
+      if (!riderDoc && ride.riderWaJid) {
+        riderDoc = await Rider.findOne({ waJid: ride.riderWaJid });
+      }
+      payerEmail = riderDoc?.email || '';
     }
 
     const wasPendingPayment = ride.status === 'payment_pending';
@@ -32,23 +56,28 @@ router.post('/notify', async (req, res) => {
     if (wasPendingPayment) ride.status = 'pending';
     await ride.save();
 
-    if (wasPendingPayment) {
-      // Tell the rider
-      try {
-        if (ride.riderChatId && RB) {
-          await RB.sendMessage(Number(ride.riderChatId), '💳 Payment received! We’re now requesting a driver for you.');
-        }
-      } catch {}
+    console.log(`✅ PayFast PAID: ride=${ride._id} email=${payerEmail || 'unknown'}`);
 
-      // Kick off the normal dispatch
+    // Fire-and-forget receipt email
+    try {
+      await sendPaymentReceiptEmail(payerEmail, {
+        amount: ride.estimate,
+        paymentMethod: 'PayFast',
+        paidAt: ride.paidAt,
+      });
+    } catch (mailErr) {
+      console.error('✉️ Receipt email failed:', mailErr?.message || mailErr);
+    }
+
+    // Kick off driver request only if this ride was waiting on payment
+    if (wasPendingPayment) {
       riderEvents.emit('booking:new', {
         chatId: ride.riderChatId || null,
         rideId: String(ride._id),
-        vehicleType: ride.vehicleType || 'normal'
+        vehicleType: ride.vehicleType || 'normal',
       });
     }
 
-    console.log(`✅ PayFast paid → ride ${ride._id} set to ${ride.status}, dispatching driver`);
     return res.status(200).send('OK');
   } catch (e) {
     console.error('payfast notify error', e);
@@ -56,7 +85,7 @@ router.post('/notify', async (req, res) => {
   }
 });
 
-/* Dev helper to simulate success locally */
+/* Dev helper to simulate success locally (no email in this one) */
 router.get('/mock-complete/:rideId', async (req, res) => {
   try {
     const ride = await Ride.findById(req.params.rideId);
@@ -73,7 +102,7 @@ router.get('/mock-complete/:rideId', async (req, res) => {
       riderEvents.emit('booking:new', {
         chatId: ride.riderChatId || null,
         rideId: String(ride._id),
-        vehicleType: ride.vehicleType || 'normal'
+        vehicleType: ride.vehicleType || 'normal',
       });
     }
 

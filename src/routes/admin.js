@@ -86,11 +86,23 @@ router.get('/drivers', ensureAdmin, async (req, res) => {
   res.render('admin/drivers', { admin: req.user, drivers });
 });
 
-/* ------------ single driver ------------ */
+/* ------------ single driver (recompute stats before render) ------------ */
 router.get('/drivers/:id', ensureAdmin, async (req, res) => {
-  const d = await Driver.findById(req.params.id).lean();
-  if (!d) return res.redirect('/admin/drivers');
-  res.render('admin/driver', { admin: req.user, d });
+  try {
+    const id = req.params.id;
+
+    // 🔁 Recompute rating + totals from rides first so avgRating/ratingsCount are fresh
+    await Driver.computeAndUpdateStats(id);
+
+    // Fetch latest driver doc for the view
+    const d = await Driver.findById(id).lean();
+    if (!d) return res.redirect('/admin/drivers');
+
+    res.render('admin/driver', { admin: req.user, d });
+  } catch (e) {
+    console.error('driver detail error:', e);
+    res.status(500).send('Server error');
+  }
 });
 
 /* ------------ approve / reject ------------ */

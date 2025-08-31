@@ -16,8 +16,11 @@ import pino from 'pino';
 import qrcode from 'qrcode';
 import EventEmitter from 'events';
 import axios from 'axios';
+import crypto from 'crypto';
 
 import Ride from '../models/Ride.js';
+import Rider from '../models/Rider.js';
+import Driver from '../models/Driver.js';
 import { riderEvents } from './riderBot.js';
 import { driverEvents } from './driverBot.js';
 import { getAvailableVehicleQuotes } from '../services/pricing.js';
@@ -34,6 +37,7 @@ const AUTH_DIR = path.resolve(ROOT_DIR, 'baileys_auth_info');
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const PUBLIC_URL = process.env.PUBLIC_URL || '';
 
 /* --------------- state --------------- */
 let sock = null;
@@ -41,17 +45,20 @@ let initializing = false;
 let currentQR = null;
 let connState = 'disconnected'; // 'disconnected' | 'connecting' | 'connected'
 
-// WA rider name (simple in-memory profile)
+// simple name memory and per-ride cache
 const waNames = new Map(); // jid -> name
-// rideId -> riderJid (so we can DM rider on accept/arrive/start/cancel)
 const waRideById = new Map();
 
-// per-JID booking wizard state
-// { stage, pickup, destination, quotes, chosenVehicle, price, rideId, suggestions, addrSession }
+// per-JID booking/registration wizard state
+// booking: { stage, pickup, destination, quotes, chosenVehicle, price, rideId, suggestions, addrSession }
+// registration: { stage: 'reg_name' | 'reg_email', temp: {name, email} }
 const convo = new Map();
 
+// rating-await map (jid -> rideId)
+const ratingAwait = new Map();
+
 /**
- * stages:
+ * booking stages:
  * - idle
  * - await_pickup
  * - await_destination
@@ -62,7 +69,7 @@ const convo = new Map();
 const VEHICLE_LABEL = (vt) =>
   vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
 
-// QR broadcast for server route /qrcode
+// QR broadcast for /qrcode
 const waEvents = new EventEmitter();
 
 /* --------------- logger --------------- */
@@ -96,7 +103,6 @@ const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
 const _recentSends = new Map(); // key `${jid}|${normText}` -> timestamp
 
 function _normalizeText(t = '') {
-  // normalize whitespace; keep content & link intact
   return String(t).trim().replace(/\s+/g, ' ');
 }
 function _shouldSendOnce(jid, text) {
@@ -105,32 +111,38 @@ function _shouldSendOnce(jid, text) {
   const last = _recentSends.get(key) || 0;
   if (now - last < DEDUPE_TTL_MS) return false;
   _recentSends.set(key, now);
-  // light pruning to keep map small
   if (_recentSends.size > 2000) {
     const cutoff = now - 2 * DEDUPE_TTL_MS;
-    for (const [k, ts] of _recentSends) {
-      if (ts < cutoff) _recentSends.delete(k);
-    }
+    for (const [k, ts] of _recentSends) if (ts < cutoff) _recentSends.delete(k);
   }
   return true;
 }
 
 async function sendText(jid, text) {
   if (!sock) throw new Error('WA client not ready');
-  if (!_shouldSendOnce(jid, text)) {
-    logger.debug?.('WA dedupe: skipped duplicate to %s: %s', jid, _normalizeText(text).slice(0, 80));
-    return;
-  }
-  // link previews disabled globally in socket options below
+  if (!_shouldSendOnce(jid, text)) return;
   await sock.sendMessage(jid, { text });
 }
 
+/* ---------- small utils ---------- */
+function generatePIN() {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+function generateToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+const EMAIL_RE =
+  /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+
+/* ---------- flow helpers ---------- */
 function resetFlow(jid) {
   convo.set(jid, { stage: 'idle' });
 }
-
 function startBooking(jid) {
   convo.set(jid, { stage: 'await_pickup' });
+}
+function startRegistration(jid) {
+  convo.set(jid, { stage: 'reg_name', temp: {} });
 }
 
 function sendMainMenu(jid) {
@@ -140,7 +152,46 @@ function sendMainMenu(jid) {
     `Please reply with a number:\n\n` +
     `1) 🚕 Book Trip\n` +
     `2) ❓ Help\n` +
-    `3) 🧑‍💬 Support`
+    `3) 🧑‍💬 Support\n` +
+    `4) 👤 Profile`
+  );
+}
+
+/* ---------- persist WA rider profile & location ---------- */
+async function upsertWaRider(jid, { name = null, lastLocation = null } = {}) {
+  const set = { lastSeenAt: new Date(), platform: 'whatsapp' };
+  if (name) set.name = name;
+  if (lastLocation) set.lastLocation = { ...lastLocation, ts: new Date() };
+  await Rider.findOneAndUpdate(
+    { waJid: jid },
+    { $set: set, $setOnInsert: { waJid: jid, platform: 'whatsapp' } },
+    { upsert: true }
+  );
+}
+
+/* ---------- Dashboard link for WA ---------- */
+async function sendDashboardLinkWA(jid) {
+  const dashboardToken = generateToken();
+  const dashboardPin = generatePIN();
+  const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
+
+  await Rider.findOneAndUpdate(
+    { waJid: jid },
+    {
+      $set: {
+        dashboardToken,
+        dashboardPin,
+        dashboardTokenExpiry: expiry,
+        platform: 'whatsapp'
+      }
+    },
+    { upsert: true }
+  );
+
+  const link = `${PUBLIC_URL}/rider-dashboard.html?token=${dashboardToken}`;
+  await sendText(
+    jid,
+    `🔐 *Dashboard link:*\n${link}\n\n🔢 *Your PIN:* ${dashboardPin}\n⏱️ *Expires in 10 mins*`
   );
 }
 
@@ -153,12 +204,7 @@ function ensureSessionToken(state) {
 async function placesAutocomplete(input, sessionToken) {
   if (!GOOGLE_MAPS_API_KEY) return [];
   const url = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
-  const params = {
-    input,
-    key: GOOGLE_MAPS_API_KEY,
-    sessiontoken: sessionToken,
-    // components: 'country:za', // uncomment to restrict
-  };
+  const params = { input, key: GOOGLE_MAPS_API_KEY, sessiontoken: sessionToken };
   const { data } = await axios.get(url, { params, timeout: 10000 });
   if (data?.status !== 'OK' || !Array.isArray(data?.predictions)) return [];
   return data.predictions.slice(0, 5).map(p => ({ place_id: p.place_id, description: p.description }));
@@ -167,25 +213,26 @@ async function placesAutocomplete(input, sessionToken) {
 async function placeDetails(placeId, sessionToken) {
   if (!GOOGLE_MAPS_API_KEY) return null;
   const url = 'https://maps.googleapis.com/maps/api/place/details/json';
-  const params = {
-    place_id: placeId,
-    fields: 'geometry/location,formatted_address,name',
-    key: GOOGLE_MAPS_API_KEY,
-    sessiontoken: sessionToken
-  };
+  const params = { place_id: placeId, fields: 'geometry/location,formatted_address,name', key: GOOGLE_MAPS_API_KEY, sessiontoken: sessionToken };
   const { data } = await axios.get(url, { params, timeout: 10000 });
   if (data?.status !== 'OK' || !data?.result?.geometry?.location) return null;
   const loc = data.result.geometry.location;
-  return {
-    lat: Number(loc.lat),
-    lng: Number(loc.lng),
-    address: data.result.formatted_address || data.result.name || ''
-  };
+  return { lat: Number(loc.lat), lng: Number(loc.lng), address: data.result.formatted_address || data.result.name || '' };
 }
 
 function formatSuggestionList(sugs) {
   if (!sugs?.length) return '';
   return sugs.map((s, i) => `${i + 1}) ${s.description}`).join('\n');
+}
+
+/* ---------- rideId -> jid resolver (works even if not cached) ---------- */
+async function getWaJidForRideId(rideId) {
+  const cached = waRideById.get(String(rideId));
+  if (cached) return cached;
+  try {
+    const r = await Ride.findById(rideId).select('riderWaJid').lean();
+    return r?.riderWaJid || null;
+  } catch { return null; }
 }
 
 /* --------------- WA setup --------------- */
@@ -204,12 +251,9 @@ async function setupClient() {
     sock = makeWASocket({
       version,
       logger,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-      },
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       browser: ['VayaRide Bot', 'Chrome', '120.0'],
-      generateHighQualityLinkPreview: false, // 🔕 avoid link-preview-js dependency/noise
+      generateHighQualityLinkPreview: false,
       qrTimeout: 60_000,
       connectTimeoutMs: 60_000,
       defaultQueryTimeoutMs: 60_000,
@@ -251,22 +295,15 @@ async function setupClient() {
       if (connection === 'close') {
         const code =
           lastDisconnect?.error?.output?.statusCode ??
-          lastDisconnect?.error?.status ??
-          0;
+          lastDisconnect?.error?.status ?? 0;
         const reason = lastDisconnect?.error?.data?.reason;
-        console.log('WA connection closed →', code, reason);
-
-        const isLoggedOut =
-          code === DisconnectReason.loggedOut ||
-          code === 401 ||
-          reason === '401' ||
-          reason === 'logged_out';
-
-        const badSession =
-          code === DisconnectReason.badSession ||
-          reason === 'bad_session';
 
         connState = 'disconnected';
+
+        const isLoggedOut =
+          code === DisconnectReason.loggedOut || code === 401 || reason === '401' || reason === 'logged_out';
+        const badSession =
+          code === DisconnectReason.badSession || reason === 'bad_session';
 
         if (isLoggedOut || badSession) {
           console.log('❌ Logged out / bad session. Clearing creds and restarting…');
@@ -287,14 +324,12 @@ async function setupClient() {
     sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const m of messages || []) {
         try {
-          // ignore ourselves & status
           const fromMe = m.key?.fromMe;
           const jid = m.key?.remoteJid;
           if (fromMe || jid === 'status@broadcast') continue;
 
           const msg = m.message || {};
 
-          // ignore non-conversational/system-ish messages completely
           if (
             msg.protocolMessage ||
             msg.reactionMessage ||
@@ -317,7 +352,6 @@ async function setupClient() {
 
           text = (text || '').trim();
 
-          // If there's neither a location nor any user text, do nothing
           if (!loc && !text) continue;
 
           if (loc) {
@@ -342,9 +376,90 @@ async function setupClient() {
 
 /* --------------- message handlers --------------- */
 async function handleTextMessage(jid, raw) {
-  if (!raw) return; // ignore empty text
+  if (!raw) return;
   const txt = (raw || '').toLowerCase();
   const state = convo.get(jid) || { stage: 'idle' };
+
+  // persist "seen" and platform
+  await upsertWaRider(jid).catch(() => {});
+
+  /* ======= REGISTRATION FLOW =======
+     - If rider is new or missing name/email → collect.
+     - Stages: reg_name → reg_email → save → send dashboard link.
+  */
+  const rider = await Rider.findOne({ waJid: jid }).lean().catch(() => null);
+  const hasName = !!(rider?.name || waNames.get(jid));
+  const hasEmail = !!rider?.email;
+
+  // Kick off registration when user says "start/hi/menu" or if not registered yet
+  if ((!hasName || !hasEmail) && (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu' || state.stage === 'idle')) {
+    startRegistration(jid);
+    await sendText(jid, '👋 Welcome! Please enter your *full name* to register:');
+    return;
+  }
+
+  // Handle reg_name
+  if (state.stage === 'reg_name') {
+    const name = raw.trim();
+    if (!/^[a-z][a-z\s.'-]{1,}$/i.test(name)) {
+      await sendText(jid, '❌ Please enter a valid full name (letters, spaces, . \' - ).');
+      return;
+    }
+    waNames.set(jid, name);
+    convo.set(jid, { stage: 'reg_email', temp: { name } });
+    await sendText(jid, '📧 Great! Now enter your *email address*:');
+    return;
+  }
+
+  // Handle reg_email
+  if (state.stage === 'reg_email') {
+    const email = raw.trim();
+    if (!EMAIL_RE.test(email)) {
+      await sendText(jid, '❌ Invalid email. Please enter a valid email address like name@example.com');
+      return;
+    }
+
+    const name = state.temp?.name || waNames.get(jid) || 'New Rider';
+    await Rider.findOneAndUpdate(
+      { waJid: jid },
+      { $set: { name, email, platform: 'whatsapp' } },
+      { upsert: true }
+    );
+
+    // Send dashboard link (token + PIN)
+    await sendDashboardLinkWA(jid);
+
+    // Completed registration → show main menu
+    resetFlow(jid);
+    await sendText(jid, `✅ Registration complete, ${name}!`);
+    await sendMainMenu(jid);
+    return;
+  }
+
+  /* ======= RATING CAPTURE (reply 1..5) ======= */
+  const pend = ratingAwait.get(jid);
+  if (pend && /^[1-5]$/.test(txt)) {
+    const stars = Number(txt);
+    try {
+      const ride = await Ride.findById(pend);
+      if (ride && !ride.driverRating) {
+        ride.driverRating = stars;
+        ride.driverRatedAt = new Date();
+        await ride.save();
+        if (ride.driverId) {
+          try { await Driver.computeAndUpdateStats(ride.driverId); } catch {}
+        }
+        await sendText(jid, `✅ Thanks! You rated ${'★'.repeat(stars)} (${stars}/5).`);
+      } else {
+        await sendText(jid, `This trip is already rated or no longer available.`);
+      }
+    } catch {
+      await sendText(jid, `⚠️ Couldn't save your rating. Please try again later.`);
+    } finally {
+      ratingAwait.delete(jid);
+    }
+    return;
+  }
 
   /* ======= GLOBAL ENTRY / MENU ======= */
   if (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu') {
@@ -353,7 +468,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Menu selection is only valid when idle (avoid clashing with 1/2 in other stages)
+  // Menu selection is only valid when idle
   if ((state.stage || 'idle') === 'idle') {
     if (txt === '1' || txt === 'book' || txt === 'book trip') {
       startBooking(jid);
@@ -375,12 +490,18 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `🧑‍💬 *Support*\nMessage us here or reach our Telegram help desk: https://t.me/yourSupportBot`);
       return;
     }
+    if (txt === '4' || txt === 'profile' || txt === 'open profile' || txt === 'dashboard' || txt === 'open dashboard') {
+      await sendDashboardLinkWA(jid);
+      return;
+    }
   }
 
-  /* ======= OPTIONAL: LIGHTWEIGHT NAME CAPTURE (non-blocking) ======= */
+  /* ======= LIGHTWEIGHT NAME CAPTURE (fallback) ======= */
   if (!waNames.has(jid) && /^[a-z][a-z\s.'-]{1,}$/i.test(raw.trim())) {
-    waNames.set(jid, raw.trim());
-    await sendText(jid, `✅ Nice to meet you, ${raw.trim()}!\nType *menu* to see options, or just *1* to book.`);
+    const nice = raw.trim();
+    waNames.set(jid, nice);
+    await upsertWaRider(jid, { name: nice }).catch(() => {});
+    await sendText(jid, `✅ Nice to meet you, ${nice}!\nType *menu* to see options, or just *1* to book.`);
     return;
   }
 
@@ -513,7 +634,7 @@ async function handleTextMessage(jid, raw) {
     state.chosenVehicle = q.vehicleType;
     state.price = q.price;
 
-    // Create Ride (payment pending) and keep rider JID for notifications
+    // Create Ride (payment pending)
     const ride = await Ride.create({
       pickup: state.pickup,
       destination: state.destination,
@@ -539,7 +660,7 @@ async function handleTextMessage(jid, raw) {
       `Choose payment:\n` +
       `1) 💵 Cash\n` +
       `2) 💳 Card (PayFast)\n` +
-      `Reply with *1* or *2*.`;
+      `Reply with *1* or *2*.`
 
     await sendText(jid, summary);
     return;
@@ -575,7 +696,7 @@ async function handleTextMessage(jid, raw) {
         await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.');
         return;
       }
-      const link = `${process.env.PUBLIC_URL}/pay/${encodeURIComponent(rideId)}`;
+      const link = `${PUBLIC_URL}/pay/${encodeURIComponent(rideId)}`;
       await sendText(jid, `💳 Pay with card here:\n${link}\n\nAfter payment, we’ll notify a driver.`);
       resetFlow(jid);
       return;
@@ -605,9 +726,11 @@ async function handleLocationMessage(jid, locationMessage) {
   const lat = locationMessage.degreesLatitude;
   const lng = locationMessage.degreesLongitude;
 
+  // persist last location for rider profile
+  await upsertWaRider(jid, { lastLocation: { lat, lng } }).catch(() => {});
+
   const state = convo.get(jid) || { stage: 'idle' };
 
-  // if not in flow, start and treat as pickup
   if (state.stage === 'idle') {
     startBooking(jid);
     state.stage = 'await_pickup';
@@ -656,31 +779,46 @@ async function handleLocationMessage(jid, locationMessage) {
   }
 }
 
-/* --------------- Telegram driver → WA rider notifications --------------- */
+/* --------------- Driver → WA rider notifications --------------- */
 driverEvents.on('ride:accepted', async ({ rideId }) => {
-  const jid = waRideById.get(String(rideId));
+  const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
-  const link = `${process.env.PUBLIC_URL}/track.html?rideId=${encodeURIComponent(rideId)}`;
+  const link = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(rideId)}`;
   try { await sendText(jid, `🚗 Your ride is on the way. Track here:\n${link}`); } catch {}
 });
 
 driverEvents.on('ride:arrived', async ({ rideId }) => {
-  const jid = waRideById.get(String(rideId));
+  const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
   try { await sendText(jid, '📍 Your driver has arrived at the pickup point.'); } catch {}
 });
 
 driverEvents.on('ride:started', async ({ rideId }) => {
-  const jid = waRideById.get(String(rideId));
+  const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
   try { await sendText(jid, '▶️ Your trip has started. Enjoy the ride!'); } catch {}
 });
 
 driverEvents.on('ride:cancelled', async ({ ride }) => {
-  const jid = ride ? waRideById.get(String(ride._id)) : null;
+  const jid = ride?.riderWaJid || (ride?._id ? await getWaJidForRideId(ride._id) : null);
   if (!jid) return;
   try { await sendText(jid, '❌ The driver cancelled the trip. Please try booking again.'); } catch {}
 });
+
+/* ------------ exported WA rating notifier ------------ */
+export async function notifyWhatsAppRiderToRate(ride) {
+  try {
+    const jid = ride?.riderWaJid || (ride?._id ? (await Ride.findById(ride._id).select('riderWaJid').lean())?.riderWaJid : null);
+    if (!jid) return;
+    ratingAwait.set(jid, String(ride._id));
+    await sendText(
+      jid,
+      '🧾 Your trip is complete.\nPlease rate your driver: reply with a number from *1* (worst) to *5* (best).'
+    );
+  } catch (e) {
+    console.warn('notifyWhatsAppRiderToRate failed:', e?.message || e);
+  }
+}
 
 /* ------------ public API ------------ */
 export function initWhatsappBot() {

@@ -7,6 +7,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import stream from 'stream';
 import sharp from 'sharp';
 import Driver from '../models/Driver.js';
+import { sendDriverWelcomeEmail } from '../services/mailer.js'; // ← ⭐ makes the email
 
 /* ---------- Cloudinary ---------- */
 cloudinary.config({
@@ -92,29 +93,75 @@ router.get('/register', ensureGuest, (req, res) => {
 
 router.post('/register', ensureGuest, async (req, res) => {
   try {
-    const { name, email, password, confirm, vehicleType } = req.body;
-    if (!name || !email || !password || !confirm || !vehicleType) {
+    // normalize/trim inputs
+    const nameRaw = (req.body.name || '').trim();
+    const emailRaw = (req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const confirm  = String(req.body.confirm || '');
+    const vehicleTypeRaw = String(req.body.vehicleType || '').toLowerCase();
+
+    console.log('📝 Driver register attempt:', {
+      namePresent: !!nameRaw,
+      email: emailRaw,
+      vehicleType: vehicleTypeRaw
+    });
+
+    // basic validation
+    if (!nameRaw || !emailRaw || !password || !confirm || !vehicleTypeRaw) {
+      console.log('⚠️ Register validation failed: missing fields');
       return res.status(200).render('driver/register', { err: 'Missing fields' });
     }
     if (password !== confirm) {
+      console.log('⚠️ Register validation failed: passwords do not match');
       return res.status(200).render('driver/register', { err: 'Passwords do not match' });
     }
-    const existing = await Driver.findOne({ email });
+
+    // allowlisted vehicle types
+    const allowedVehicles = ['normal', 'comfort', 'luxury', 'xl'];
+    if (!allowedVehicles.includes(vehicleTypeRaw)) {
+      console.log('⚠️ Register validation failed: invalid vehicle type:', vehicleTypeRaw);
+      return res.status(200).render('driver/register', { err: 'Invalid vehicle type' });
+    }
+
+    // unique email
+    const existing = await Driver.findOne({ email: emailRaw });
     if (existing) {
+      console.log('⚠️ Register validation failed: email already in use:', emailRaw);
       return res.status(200).render('driver/register', { err: 'Email already in use' });
     }
+
+    // hash + create
     const passwordHash = await bcrypt.hash(password, 10);
-    await Driver.create({
-      name,
-      email,
+    const created = await Driver.create({
+      name: nameRaw,
+      email: emailRaw,
       passwordHash,
-      vehicleType,
+      vehicleType: vehicleTypeRaw,
       status: 'pending',
       isAvailable: false
     });
-    return res.redirect(`/driver/login?email=${encodeURIComponent(email)}`);
+
+    console.log('✅ Driver created:', { id: String(created._id), email: emailRaw });
+
+    // env sanity for mailer (do not print secrets!)
+    console.log('✉️ Mailer env check:', {
+      EMAIL_USER_present: !!process.env.EMAIL_USER,
+      EMAIL_PASS_present: !!process.env.EMAIL_PASS
+    });
+
+    // send welcome email (non-fatal if it fails)
+    try {
+      console.log('✉️ Sending welcome email to', emailRaw);
+      await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw });
+      console.log('✅ Welcome email queued/sent to', emailRaw);
+    } catch (e) {
+      console.error('❌ Welcome email failed:', e?.message || e, e?.stack ? '\n' + e.stack : '');
+    }
+
+    // redirect to login with email prefilled
+    return res.redirect(`/driver/login?email=${encodeURIComponent(emailRaw)}`);
   } catch (err) {
-    console.error('❌ Register error:', err);
+    console.error('❌ Register error:', err?.message || err, err?.stack ? '\n' + err.stack : '');
     return res.status(500).render('driver/register', { err: 'Server error' });
   }
 });

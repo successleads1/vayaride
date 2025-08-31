@@ -1,33 +1,6 @@
 // src/models/Driver.js
 import mongoose from 'mongoose';
-import Ride from './Ride.js'; // used by computeAndUpdateStats
-
-/* ---------------- helpers ---------------- */
-function toRad(x){ return (x * Math.PI) / 180; }
-function haversineMeters(a, b){
-  if (!a || !b || typeof a.lat !== 'number' || typeof a.lng !== 'number' ||
-      typeof b.lat !== 'number' || typeof b.lng !== 'number') return 0;
-  const R = 6371000;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lng - a.lng);
-  const s =
-    Math.sin(dLat/2) ** 2 +
-    Math.cos(toRad(a.lat)) *
-    Math.cos(toRad(b.lat)) *
-    Math.sin(dLon/2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(Math.max(0, s)));
-}
-function pathDistanceM(path = []){
-  let m = 0;
-  for (let i = 1; i < path.length; i++) m += haversineMeters(path[i-1], path[i]);
-  return Math.round(m);
-}
-function pathDurationSec(path = [], createdAt, updatedAt){
-  const firstTs = path[0]?.ts ? new Date(path[0].ts).getTime() : (createdAt ? new Date(createdAt).getTime() : null);
-  const lastTs  = path[path.length-1]?.ts ? new Date(path[path.length-1].ts).getTime() : (updatedAt ? new Date(updatedAt).getTime() : null);
-  if (!firstTs || !lastTs || lastTs < firstTs) return 0;
-  return Math.round((lastTs - firstTs) / 1000);
-}
+import Ride from './Ride.js'; // needed for stats aggregation / lastTrip
 
 /* ---------------- stats subdocs ---------------- */
 const DriverStatsLastTripSchema = new mongoose.Schema({
@@ -46,12 +19,15 @@ const DriverStatsLastTripSchema = new mongoose.Schema({
 
 const DriverStatsSchema = new mongoose.Schema({
   totalTrips:      { type: Number, default: 0 },   // completed
-  totalDistanceM:  { type: Number, default: 0 },
-  totalEarnings:   { type: Number, default: 0 },   // sum amounts of completed rides
+  totalDistanceM:  { type: Number, default: 0 },   // meters
+  totalEarnings:   { type: Number, default: 0 },   // ZAR
   cashCount:       { type: Number, default: 0 },
   payfastCount:    { type: Number, default: 0 },   // counts 'payfast' or 'app'
   currency:        { type: String, default: 'ZAR' },
-  lastTrip:        { type: DriverStatsLastTripSchema, default: () => ({}) }
+  lastTrip:        { type: DriverStatsLastTripSchema, default: () => ({}) },
+  // ⭐ NEW rating aggregates
+  avgRating:       { type: Number, default: 0 },
+  ratingsCount:    { type: Number, default: 0 }
 }, { _id: false });
 
 /* ---------------- main driver schema ---------------- */
@@ -94,64 +70,81 @@ const DriverSchema = new mongoose.Schema({
   stats: { type: DriverStatsSchema, default: () => ({}) }
 }, { timestamps: true });
 
-/* ---------------- static: recompute stats from rides ---------------- */
+/* ---------------- static: recompute stats from rides (with ratings) ---------------- */
 DriverSchema.statics.computeAndUpdateStats = async function (driverId) {
-  const drvId = typeof driverId === 'string' ? new mongoose.Types.ObjectId(driverId) : driverId;
+  const driverIdObj = typeof driverId === 'string' ? new mongoose.Types.ObjectId(driverId) : driverId;
 
-  // Completed rides for this driver
-  const rides = await Ride.find({
-    driverId: drvId,
-    status: 'completed'
-  }).sort({ updatedAt: -1 }).lean();
+  // Aggregate totals & ratings from completed rides
+  const [agg] = await Ride.aggregate([
+    { $match: { driverId: driverIdObj, status: 'completed' } },
+    {
+      $group: {
+        _id: null,
+        trips: { $sum: 1 },
+        // sum of finalDistanceKm (km) → convert to meters later
+        distKm: { $sum: { $ifNull: ['$finalDistanceKm', 0] } },
+        // sum of finalAmount (ZAR)
+        earn:  { $sum: { $ifNull: ['$finalAmount', 0] } },
+        cashCount:    { $sum: { $cond: [{ $eq: ['$paymentMethod', 'cash'] }, 1, 0] } },
+        payfastCount: { $sum: { $cond: [{ $in: ['$paymentMethod', ['payfast', 'app']] }, 1, 0] } },
+        ratingSum:    { $sum: { $ifNull: ['$driverRating', 0] } }, // rider → driver
+        ratingCnt:    { $sum: { $cond: [{ $gt: ['$driverRating', 0] }, 1, 0] } },
+        lastTripAt:   { $max: '$completedAt' }
+      }
+    }
+  ]);
 
-  let totalTrips = 0;
-  let totalEarnings = 0;
-  let totalDistanceM = 0;
-  let cashCount = 0;
-  let payfastCount = 0;
+  // Find last completed ride details for lastTrip snapshot
+  const last = await Ride.findOne({ driverId: driverIdObj, status: 'completed' })
+    .sort({ completedAt: -1, updatedAt: -1 })
+    .lean();
 
-  for (const r of rides) {
-    totalTrips += 1;
-
-    // Prefer final amounts/distances; fall back gracefully
-    const amt = (r.finalAmount != null ? Number(r.finalAmount) : Number(r.estimate || 0));
-    const distM = Number.isFinite(r.finalDistanceKm) ? Number(r.finalDistanceKm) * 1000 : pathDistanceM(r.path || []);
-
-    totalEarnings += Number.isFinite(amt) ? amt : 0;
-    totalDistanceM += Number.isFinite(distM) ? distM : 0;
-
-    // Treat 'app' same as 'payfast' in counts
-    if (r.paymentMethod === 'cash') cashCount += 1;
-    if (r.paymentMethod === 'payfast' || r.paymentMethod === 'app') payfastCount += 1;
+  const updates = {};
+  if (agg) {
+    updates['stats.totalTrips']     = agg.trips || 0;
+    updates['stats.totalDistanceM'] = Math.round((agg.distKm || 0) * 1000); // km → m
+    updates['stats.totalEarnings']  = Math.round(agg.earn || 0);
+    updates['stats.cashCount']      = agg.cashCount || 0;
+    updates['stats.payfastCount']   = agg.payfastCount || 0;
+    updates['stats.avgRating']      = agg.ratingCnt ? +(agg.ratingSum / agg.ratingCnt).toFixed(2) : 0;
+    updates['stats.ratingsCount']   = agg.ratingCnt || 0;
+  } else {
+    updates['stats.totalTrips']     = 0;
+    updates['stats.totalDistanceM'] = 0;
+    updates['stats.totalEarnings']  = 0;
+    updates['stats.cashCount']      = 0;
+    updates['stats.payfastCount']   = 0;
+    updates['stats.avgRating']      = 0;
+    updates['stats.ratingsCount']   = 0;
   }
 
-  const last = rides[0];
-  const lastTrip = last ? {
-    rideId: last._id,
-    startedAt: last.createdAt || null,
-    pickedAt:  last.pickedAt || null,
-    finishedAt: last.completedAt || last.updatedAt || null,
-    durationSec: pathDurationSec(last.path || [], last.createdAt, last.updatedAt),
-    distanceMeters: Number.isFinite(last.finalDistanceKm) ? Math.round(Number(last.finalDistanceKm) * 1000) : pathDistanceM(last.path || []),
-    amount: (last.finalAmount != null ? Number(last.finalAmount) : Number(last.estimate || 0)),
-    currency: 'ZAR',
-    method: (last.paymentMethod === 'cash' || last.paymentMethod === 'payfast' || last.paymentMethod === 'app') ? last.paymentMethod : null,
-    pickup: last.pickup || null,
-    drop: last.destination || null
-  } : {};
+  // Build lastTrip snapshot
+  if (last) {
+    const distM = Number.isFinite(last.finalDistanceKm)
+      ? Math.round(Number(last.finalDistanceKm) * 1000)
+      : 0;
 
-  const update = {
-    'stats.totalTrips': totalTrips,
-    'stats.totalEarnings': Math.round(totalEarnings),
-    'stats.totalDistanceM': Math.round(totalDistanceM),
-    'stats.cashCount': cashCount,
-    'stats.payfastCount': payfastCount,
-    'stats.currency': 'ZAR',
-    'stats.lastTrip': lastTrip
-  };
+    updates['stats.lastTrip'] = {
+      rideId: last._id,
+      startedAt: last.createdAt || null,
+      pickedAt:  last.pickedAt || null,
+      finishedAt: last.completedAt || last.updatedAt || null,
+      durationSec: Number.isFinite(last.finalDurationSec) ? Math.round(last.finalDurationSec) : 0,
+      distanceMeters: distM,
+      amount: (last.finalAmount != null ? Number(last.finalAmount) : Number(last.estimate || 0)) || 0,
+      currency: 'ZAR',
+      method: (['cash', 'payfast', 'app'].includes(last.paymentMethod) ? last.paymentMethod : null),
+      pickup: last.pickup || null,
+      drop: last.destination || null
+    };
+  } else {
+    updates['stats.lastTrip'] = {};
+  }
 
-  await mongoose.model('Driver').findByIdAndUpdate(drvId, { $set: update }, { new: true });
-  return update;
+  updates['stats.currency'] = 'ZAR';
+
+  await this.updateOne({ _id: driverIdObj }, { $set: updates });
+  return updates;
 };
 
 export default mongoose.model('Driver', DriverSchema);

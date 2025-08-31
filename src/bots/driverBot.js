@@ -23,6 +23,23 @@ function onlineKeyboard(isOnline) {
     }
   };
 }
+
+// Parser-safe stars keyboard (single row, 5 buttons)
+function starsKeyboard(kind, rideId) {
+  const row = Array.from({ length: 5 }, (_, i) => {
+    const n = i + 1;
+    return {
+      text: '★'.repeat(n),
+      callback_data: `${kind}:${rideId}:${n}`
+    };
+  });
+  return {
+    reply_markup: {
+      inline_keyboard: [row]
+    }
+  };
+}
+
 function locationKeyboard() {
   return {
     reply_markup: {
@@ -114,6 +131,9 @@ function formatStatsMessage(driver) {
   lines.push(`• Distance: <b>${fmtKm(s.totalDistanceM || 0)}</b>`);
   lines.push(`• Earnings: <b>${fmtAmount(s.totalEarnings || 0)}</b>`);
   lines.push(`• Payments: ${s.cashCount || 0} cash · ${s.payfastCount || 0} payfast`);
+  if (typeof s.avgRating === 'number' && s.ratingsCount >= 0) {
+    lines.push(`• Rating: <b>${(s.avgRating || 0).toFixed(2)}</b> (${s.ratingsCount || 0})`);
+  }
 
   if (last && last.rideId) {
     lines.push('\n🧾 <b>Last Trip</b>');
@@ -128,11 +148,6 @@ function formatStatsMessage(driver) {
 
   return lines.join('\n');
 }
-
-/**
- * Always recompute fresh before showing stats.
- * (Previously this only recomputed when totalTrips was null, which left 0s.)
- */
 async function ensureAndGetDriverStatsByChat(chatId) {
   const driver = await Driver.findOne({ chatId: Number(chatId) });
   if (!driver) return null;
@@ -225,6 +240,28 @@ export function initDriverBot(io) {
       driver = await ensureAndGetDriverStatsByChat(chatId);
       if (driver?.stats) {
         await bot.sendMessage(chatId, formatStatsMessage(driver), { parse_mode: 'HTML' });
+      }
+    } catch {}
+
+    // ⭐ Nudge to rate last rider (completed & unrated in last 48h)
+    try {
+      const since = new Date(Date.now() - 48 * 3600 * 1000);
+      const d = await Driver.findOne({ chatId }).lean();
+      if (d?._id) {
+        const lastUnrated = await Ride.findOne({
+          driverId: d._id,
+          status: 'completed',
+          riderRating: { $in: [null, undefined] },
+          completedAt: { $gte: since }
+        }).sort({ completedAt: -1 }).lean();
+
+        if (lastUnrated?._id) {
+          await bot.sendMessage(
+            chatId,
+            'Please rate your last rider:',
+            starsKeyboard('rate_rider', String(lastUnrated._id))
+          );
+        }
       }
     } catch {}
   });
@@ -434,6 +471,37 @@ export function initDriverBot(io) {
         return;
       }
 
+      // ⭐⭐ Rating callback: driver rates rider
+      if (data.startsWith('rate_rider:')) {
+        const [, rideId, starsStr] = data.split(':');
+        const stars = Number(starsStr);
+        if (!(stars >= 1 && stars <= 5)) {
+          try { await bot.answerCallbackQuery(query.id, { text: 'Invalid rating' }); } catch {}
+          return;
+        }
+
+        const ride = await Ride.findById(rideId);
+        if (!ride) {
+          try { await bot.answerCallbackQuery(query.id, { text: 'Ride not found' }); } catch {}
+          return;
+        }
+
+        const driver = await Driver.findOne({ chatId: Number(chatId) }).lean();
+        if (!driver || String(ride.driverId) !== String(driver._id)) {
+          try { await bot.answerCallbackQuery(query.id, { text: 'Not your trip' }); } catch {}
+          return;
+        }
+
+        // Save rating (driver → rider)
+        ride.riderRating = stars;
+        ride.riderRatedAt = new Date();
+        await ride.save();
+
+        try { await bot.answerCallbackQuery(query.id, { text: `Thanks! You rated ${stars}★` }); } catch {}
+        await bot.sendMessage(chatId, `✅ Rating saved: ${'★'.repeat(stars)}`);
+        return;
+      }
+
       // NOTE: trip control actions removed as requested.
 
     } catch (err) {
@@ -511,6 +579,15 @@ export async function notifyDriverRideFinished(rideId) {
   } catch (e) {
     console.warn('notifyDriverRideFinished sendMessage failed:', e?.message || e);
   }
+
+  // ⭐ Ask driver to rate rider
+  try {
+    await bot.sendMessage(
+      chatId,
+      'How was the rider? Please leave a rating:',
+      starsKeyboard('rate_rider', String(rideId))
+    );
+  } catch {}
 }
 
 /* ---------------- Export bot handle ---------------- */

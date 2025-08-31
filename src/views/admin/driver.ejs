@@ -2,7 +2,7 @@
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Admin • Driver</title>
 <style>
-:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;--ok:#00e676;--err:#ff4d4d}
+:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;--ok:#00e676;--err:#ff4d4d;--star:#ffd34d;--star-bg:#333}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
 .layout{display:flex;min-height:100vh}
 aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
@@ -23,6 +23,15 @@ h2{margin:0 0 10px;font-size:18px}
 .badge{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222}
 .pin{font-size:20px;font-weight:800;letter-spacing:2px}
 .thumb{width:72px;height:72px;border:1px solid #222;border-radius:8px;object-fit:cover;background:#111}
+
+/* ⭐ star bar */
+.stars{position:relative;display:inline-block;line-height:1;color:var(--star-bg);font-size:18px}
+.stars::before{content:'★★★★★';letter-spacing:1px}
+.stars .fill{position:absolute;inset:0 0 0 0;white-space:nowrap;overflow:hidden;width:0;color:var(--star)}
+.stars .fill::before{content:'★★★★★';letter-spacing:1px}
+.muted{color:var(--muted)}
+.kv{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.kv b{min-width:88px;display:inline-block}
 </style></head><body>
 <div class="layout">
   <aside>
@@ -43,15 +52,30 @@ h2{margin:0 0 10px;font-size:18px}
       <h2>Driver</h2>
       <div class="grid">
         <div>
-          <div><b>Name:</b> <%= d.name %></div>
-          <div><b>Email:</b> <%= d.email %></div>
-          <div><b>Vehicle:</b> <%= d.vehicleType || '-' %></div>
-          <div><b>Status:</b> <span class="badge"><%= d.status %></span></div>
+          <div class="kv"><b>Name:</b> <span><%= d.name %></span></div>
+          <div class="kv"><b>Email:</b> <span><%= d.email %></span></div>
+          <div class="kv"><b>Vehicle:</b> <span><%= d.vehicleType || '-' %></span></div>
+          <div class="kv"><b>Status:</b> <span class="badge"><%= d.status %></span></div>
+
+          <% /* ⭐ Rating row (avg + stars + count) */ %>
+          <% const avg = Number(d?.stats?.avgRating || 0); %>
+          <% const cnt = Number(d?.stats?.ratingsCount || 0); %>
+          <% const pct = Math.min(100, Math.max(0, (avg / 5) * 100)); %>
+          <div class="kv" style="margin-top:10px">
+            <b>Rating:</b>
+            <span class="stars" title="<%= avg.toFixed(2) %> / 5 from <%= cnt %> ratings">
+              <span class="fill" style="width:<%= pct %>%"></span>
+            </span>
+            <span>&nbsp;<b><%= avg.toFixed(2) %></b> / 5</span>
+            <span class="muted">(<%= cnt %> ratings)</span>
+          </div>
+
           <% if (d.status === 'approved' && d.botPin) { %>
             <div style="margin-top:10px"><b>Telegram PIN:</b> <span class="pin"><%= d.botPin %></span></div>
-            <div class="muted" style="color:#bbb;font-size:13px;margin-top:6px;">Share this PIN with the driver (shown on their dashboard). They’ll use it to log in to the Telegram driver bot.</div>
+            <div class="muted" style="font-size:13px;margin-top:6px;">Share this PIN with the driver (shown on their dashboard). They’ll use it to log in to the Telegram driver bot.</div>
           <% } %>
         </div>
+
         <div style="display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
           <form method="POST" action="/admin/drivers/<%= d._id %>/approve">
             <button class="btn approve" type="submit">Approve + Generate PIN</button>

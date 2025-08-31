@@ -30,6 +30,23 @@ const isLikelyAddress = (t) => !!(t && /[a-z]/i.test(t) && (/\d/.test(t) || /\s/
 const generatePIN = () => Math.floor(1000 + Math.random() * 9000).toString();
 const generateToken = () => crypto.randomBytes(24).toString('hex');
 
+/* ---------- Rating UI helper (parser-safe) ---------- */
+function riderStarsKeyboard(rideId) {
+  const row = Array.from({ length: 5 }, (_, i) => {
+    const n = i + 1;
+    return {
+      text: '★'.repeat(n),
+      callback_data: `rate_driver:${rideId}:${n}`
+    };
+  });
+
+  return {
+    reply_markup: {
+      inline_keyboard: [row] // a single row with 5 buttons
+    }
+  };
+}
+
 /* ---------- Google helpers ---------- */
 async function gmapsAutocomplete(input, { sessiontoken } = {}) {
   if (!GMAPS_KEY) return [];
@@ -181,19 +198,38 @@ function wireRiderHandlers() {
 
     if (!rider?.name) {
       riderState.set(chatId, { step: 'awaiting_name' });
-      return riderBot.sendMessage(chatId, '👋 Welcome! Please enter your full name to register:');
+      await riderBot.sendMessage(chatId, '👋 Welcome! Please enter your full name to register:');
+    } else {
+      await riderBot.sendMessage(chatId, '👋 Welcome back! Choose an option:', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🚕 Book Trip', callback_data: 'book_trip' }],
+            [{ text: '💳 Add Credit', callback_data: 'open_dashboard' }],
+            [{ text: '👤 Profile', callback_data: 'open_dashboard' }],
+            [{ text: '❓ Help Desk', url: 'https://t.me/yourSupportBot' }]
+          ]
+        }
+      });
     }
 
-    return riderBot.sendMessage(chatId, '👋 Welcome back! Choose an option:', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🚕 Book Trip', callback_data: 'book_trip' }],
-          [{ text: '💳 Add Credit', callback_data: 'open_dashboard' }],
-          [{ text: '👤 Profile', callback_data: 'open_dashboard' }],
-          [{ text: '❓ Help Desk', url: 'https://t.me/yourSupportBot' }]
-        ]
+    // ⭐ Nudge if they have an unrated completed trip in last 48h
+    try {
+      const since = new Date(Date.now() - 48 * 3600 * 1000);
+      const lastUnrated = await Ride.findOne({
+        riderChatId: chatId,
+        status: 'completed',
+        driverRating: { $in: [null, undefined] },
+        completedAt: { $gte: since }
+      }).sort({ completedAt: -1 }).lean();
+
+      if (lastUnrated?._id) {
+        await riderBot.sendMessage(
+          chatId,
+          'Please rate your last driver:',
+          riderStarsKeyboard(String(lastUnrated._id))
+        );
       }
-    });
+    } catch {}
   });
 
   /* Registration flow + free text + location */
@@ -229,7 +265,8 @@ function wireRiderHandlers() {
           return riderBot.sendMessage(chatId, '❌ Invalid amount. Enter a number.');
         }
         const dashboardToken = generateToken();
-        const dashboardPin = generatePIN();
+        const dashboardPin = generatePIN(); // <-- fixed
+
         const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
         await Rider.findOneAndUpdate(
@@ -372,85 +409,115 @@ function wireRiderHandlers() {
 
       /* ---- Vehicle chosen ----
          data: 'veh:<vehicleType>:<price>' */
-  // Update for data: 'veh:<vehicleType>:<price>'
-if (data.startsWith('veh:')) {
-  const [, vehicleType, priceStr] = data.split(':');
-  const price = Number(priceStr);  // Parse price as a number
-  const st = riderState.get(chatId);  // Retrieve rider's session state
+      if (data.startsWith('veh:')) {
+        const [, vehicleType, priceStr] = data.split(':');
+        const price = Number(priceStr);
+        const st = riderState.get(chatId);
 
-  // Validate session and price
-  if (!st || !st.pickup || !st.destination || Number.isNaN(price)) {
-    riderState.set(chatId, { step: 'awaiting_pickup' });
-    await riderBot.sendMessage(chatId, '⚠️ Session expired. Please send your pickup location again.');
-    return askPickup(chatId);  // Prompt the rider to set pickup again if session is invalid
-  }
+        if (!st || !st.pickup || !st.destination || Number.isNaN(price)) {
+          riderState.set(chatId, { step: 'awaiting_pickup' });
+          await riderBot.sendMessage(chatId, '⚠️ Session expired. Please send your pickup location again.');
+          return askPickup(chatId);
+        }
 
-  // Create the ride in the database
-  const ride = await Ride.create({
-    riderChatId: chatId,
-    pickup: st.pickup,
-    destination: st.destination,
-    estimate: price,  // Pass the selected price here
-    vehicleType,
-    status: 'payment_pending',  // Set status to payment_pending
-    paymentMethod: 'payfast',  // Default payment method is PayFast (card)
-    platform: 'telegram'  // Use Telegram as the platform
-  });
+        const ride = await Ride.create({
+          riderChatId: chatId,
+          pickup: st.pickup,
+          destination: st.destination,
+          estimate: price,
+          vehicleType,
+          status: 'payment_pending',
+          paymentMethod: 'payfast',
+          platform: 'telegram'
+        });
 
-  // Generate the PayFast redirect URL for payment
-  const payfastRedirect = `${PUBLIC_URL}/pay/${ride._id}`;  // Ensure PUBLIC_URL is correctly set in your .env file
+        const payfastRedirect = `${PUBLIC_URL}/pay/${ride._id}`;
 
-  // Send payment method options to the rider
-  await riderBot.sendMessage(chatId, '💳 Choose your payment method:', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '💵 Cash', callback_data: `pay_cash_${ride._id}` }],
-        [{ text: '💳 Pay with Card (Payfast)', url: payfastRedirect }]
-      ]
-    }
-  });
+        await riderBot.sendMessage(chatId, '💳 Choose your payment method:', {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '💵 Cash', callback_data: `pay_cash_${ride._id}` }],
+              [{ text: '💳 Pay with Card (Payfast)', url: payfastRedirect }]
+            ]
+          }
+        });
 
-  // Update session state with the ride details
-  riderState.set(chatId, {
-    ...st,
-    step: 'awaiting_payment',  // Update the step to awaiting payment
-    chosenVehicleType: vehicleType,
-    rideId: String(ride._id)  // Store the ride ID for future reference
-  });
+        riderState.set(chatId, {
+          ...st,
+          step: 'awaiting_payment',
+          chosenVehicleType: vehicleType,
+          rideId: String(ride._id)
+        });
 
-  return;
-}
-
+        return;
+      }
 
       /* ---- Cash selected → set payment + dispatch ---- */
- /* ---- Cash selected → set payment + dispatch ---- */
-if (data.startsWith('pay_cash_')) {
-  const rideId = data.replace('pay_cash_', '');
-  const ride = await Ride.findById(rideId);
-  if (!ride) return;
+      if (data.startsWith('pay_cash_')) {
+        const rideId = data.replace('pay_cash_', '');
+        const ride = await Ride.findById(rideId);
+        if (!ride) return;
 
-  // ✅ treat cash as paid in the mock
-  ride.paymentMethod = 'cash';
-  ride.paymentStatus = 'paid';
-  ride.paidAt = new Date();
+        // ✅ treat cash as paid in the mock
+        ride.paymentMethod = 'cash';
+        ride.paymentStatus = 'paid';
+        ride.paidAt = new Date();
 
-  ride.status = 'pending';
-  ride.platform = 'telegram';
-  await ride.save();
+        ride.status = 'pending';
+        ride.platform = 'telegram';
+        await ride.save();
 
-  const st = riderState.get(chatId);
-  const vehicleType = st?.chosenVehicleType || ride.vehicleType;
+        const st = riderState.get(chatId);
+        const vehicleType = st?.chosenVehicleType || ride.vehicleType;
 
-  riderEvents.emit('booking:new', {
-    chatId,
-    rideId: String(ride._id),
-    vehicleType
-  });
+        riderEvents.emit('booking:new', {
+          chatId,
+          rideId: String(ride._id),
+          vehicleType
+        });
 
-  await riderBot.sendMessage(chatId, '✅ Cash selected. Requesting your driver now.');
-  riderState.delete(chatId);
-  return;
-}
+        await riderBot.sendMessage(chatId, '✅ Cash selected. Requesting your driver now.');
+        riderState.delete(chatId);
+        return;
+      }
+
+      // ⭐⭐ Rating callback: rider rates driver
+      if (data.startsWith('rate_driver:')) {
+        const [, rideId, starsStr] = data.split(':');
+        const stars = Number(starsStr);
+        if (!(stars >= 1 && stars <= 5)) {
+          try { await riderBot.answerCallbackQuery(query.id, { text: 'Invalid rating' }); } catch {}
+          return;
+        }
+
+        const ride = await Ride.findById(rideId);
+        if (!ride) {
+          try { await riderBot.answerCallbackQuery(query.id, { text: 'Ride not found' }); } catch {}
+          return;
+        }
+
+        if (String(ride.riderChatId) !== String(chatId)) {
+          try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your ride' }); } catch {}
+          return;
+        }
+
+        // Save rating (rider → driver)
+        ride.driverRating = stars;
+        ride.driverRatedAt = new Date();
+        await ride.save();
+
+        // Refresh driver aggregates
+        try {
+          if (ride.driverId) {
+            const { default: Driver } = await import('../models/Driver.js');
+            await Driver.computeAndUpdateStats(ride.driverId);
+          }
+        } catch {}
+
+        try { await riderBot.answerCallbackQuery(query.id, { text: `Thanks! You rated ${stars}★` }); } catch {}
+        await riderBot.sendMessage(chatId, `✅ Rating saved: ${'★'.repeat(stars)}`);
+        return;
+      }
 
     } catch (err) {
       console.error('rider callback_query error:', err);
@@ -523,6 +590,22 @@ if (data.startsWith('pay_cash_')) {
     const { latitude, longitude } = msg.location;
     await emitRiderLocation(chatId, { lat: latitude, lng: longitude });
   });
+}
+
+/* ---------- Notifier: ask rider to rate driver (exported) ---------- */
+export async function notifyRiderToRateDriver(ride) {
+  try {
+    const chatId = ride.riderChatId;           // Telegram riders only
+    if (!chatId) return;
+
+    await riderBot.sendMessage(
+      chatId,
+      'Your trip is complete. Please rate your driver:',
+      riderStarsKeyboard(String(ride._id))
+    );
+  } catch (e) {
+    console.warn('notifyRiderToRateDriver failed:', e?.message || e);
+  }
 }
 
 /* ---------- Init ---------- */

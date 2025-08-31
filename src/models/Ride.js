@@ -29,9 +29,10 @@ const RideSchema = new mongoose.Schema(
     vehicleType: { type: String },
 
     // Payment
-    paymentMethod: { type: String, enum: ['cash', 'payfast'], default: 'cash' },
+    // 👇 extend enum to allow 'app' / 'paypal' (card-like)
+    paymentMethod: { type: String, enum: ['cash', 'payfast', 'app', 'paypal'], default: 'cash' },
 
-    // ⭐ ADDED: PayFast/Payment tracking
+    // Payment tracking
     paymentStatus: { type: String, enum: ['unpaid', 'paid'], default: 'unpaid' },
     paidAt: { type: Date },
 
@@ -49,7 +50,11 @@ const RideSchema = new mongoose.Schema(
     cancelledAt: { type: Date },
     cancelledBy: { type: String, enum: ['driver', 'rider', 'system'], default: undefined },
 
-    // Time markers (optional but useful)
+    // ⭐ NEW: capture where & how far when cancelled
+    cancelDriverLoc: { lat: Number, lng: Number }, // last driver coords when cancelled
+    cancelDistanceKm: { type: Number },            // distance from pickup to cancel point (km, ~2 decimals)
+
+    // Time markers
     startedAt: { type: Date },
     pickedAt: { type: Date },
     completedAt: { type: Date },
@@ -66,7 +71,15 @@ const RideSchema = new mongoose.Schema(
     viewerPath: [PointSchema],  // optional breadcrumb from viewers
 
     // Source platform (for notifications)
-    platform: { type: String, enum: ['telegram', 'whatsapp', null], default: null }
+    platform: { type: String, enum: ['telegram', 'whatsapp', null], default: null },
+
+    // ⭐⭐⭐ RATINGS
+    // rider → driver
+    driverRating: { type: Number, min: 1, max: 5, default: null },
+    driverRatedAt: { type: Date, default: null },
+    // driver → rider
+    riderRating: { type: Number, min: 1, max: 5, default: null },
+    riderRatedAt: { type: Date, default: null }
   },
   { timestamps: true }
 );

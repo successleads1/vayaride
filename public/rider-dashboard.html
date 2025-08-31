@@ -34,6 +34,8 @@
     .stat .label { color:#aaa; font-size:12px; }
     .stat .value { font-size:18px; font-weight:600; margin-top:4px; }
     .muted { color:#aaa; font-size: 14px; }
+    .stars { font-size: 18px; letter-spacing: 2px; }
+    .stars .dim { opacity: 0.25; }
     @media (max-width: 480px) {
       input, button { font-size: 15px; padding: 10px; }
       .grid { grid-template-columns: 1fr; }
@@ -53,12 +55,20 @@
           <div class="label">Trips Completed</div>
           <div id="trips" class="value">0</div>
         </div>
+
         <div class="stat">
           <div class="label">Last Payment</div>
           <div class="value">
             <span id="lastPaymentAmount">—</span>
           </div>
           <div class="muted" id="lastPaymentMeta">—</div>
+        </div>
+
+        <!-- ⭐ Rider Rating (driver → rider) -->
+        <div class="stat" style="grid-column: 1 / -1;">
+          <div class="label">Rider Rating</div>
+          <div id="ratingStars" class="stars">★★★★★</div>
+          <div id="ratingMeta" class="muted">—</div>
         </div>
       </div>
 
@@ -110,6 +120,13 @@
       if (isNaN(dt.getTime())) return '';
       return dt.toLocaleString();
     }
+    function renderStars(avg) {
+      // 0..5, show filled/empty stars (no halves for simplicity)
+      const rounded = Math.round(Number(avg || 0));
+      const filled = '★'.repeat(Math.min(5, Math.max(0, rounded)));
+      const empty = '★'.repeat(5 - Math.min(5, Math.max(0, rounded)));
+      return `<span>${filled}</span><span class="dim">${empty}</span>`;
+    }
 
     async function submitPIN(e) {
       e.preventDefault();
@@ -138,7 +155,7 @@
         document.getElementById('pinModal').style.display = 'none';
 
         // Base profile
-        document.getElementById('chatIdInput').value = data.chatId;
+        document.getElementById('chatIdInput').value = data.chatId ?? '';
         document.getElementById('name').textContent = data.name || '—';
         document.getElementById('email').textContent = data.email || '—';
         document.getElementById('trips').textContent = data.trips || 0;
@@ -152,11 +169,27 @@
         const metaNode = document.getElementById('lastPaymentMeta');
         if (data.lastPayment && typeof data.lastPayment.amount === 'number') {
           amtNode.textContent = 'R' + data.lastPayment.amount.toFixed(0);
-          metaNode.textContent = `${fmtMethod(data.lastPayment.method)} ${fmtDate(data.lastPayment.at) ? '· ' + fmtDate(data.lastPayment.at) : ''}`;
+          const when = fmtDate(data.lastPayment.at);
+          metaNode.textContent = `${fmtMethod(data.lastPayment.method)}${when ? ' · ' + when : ''}`;
         } else {
           amtNode.textContent = '—';
           metaNode.textContent = 'No payments yet';
         }
+
+        // ⭐ Rider rating (driver → rider)
+        const ratingStarsEl = document.getElementById('ratingStars');
+        const ratingMetaEl = document.getElementById('ratingMeta');
+        const avg = data?.riderStars?.avg ?? null;
+        const count = data?.riderStars?.count ?? 0;
+
+        if (avg && count > 0) {
+          ratingStarsEl.innerHTML = renderStars(avg);
+          ratingMetaEl.textContent = `${avg.toFixed(1)} / 5.0 · ${count} rating${count === 1 ? '' : 's'}`;
+        } else {
+          ratingStarsEl.innerHTML = '<span class="dim">★★★★★</span>';
+          ratingMetaEl.textContent = 'No ratings yet';
+        }
+
       } catch (err) {
         console.error('🔐 PIN verify error:', err);
         pinMsg.textContent = err.message || "❌ Access denied or expired.";
@@ -170,7 +203,6 @@
       payload.append('chatId', document.getElementById('chatIdInput').value);
       payload.append('name', document.getElementById('nameInput').value);
       payload.append('email', document.getElementById('emailInput').value);
-      // no credit anymore
 
       const res = await fetch('/api/update-profile', {
         method: 'POST',

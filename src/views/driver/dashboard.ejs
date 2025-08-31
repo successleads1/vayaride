@@ -3,54 +3,135 @@
 <head>
   <meta charset="UTF-8" />
   <title>VayaRide • Driver Dashboard</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <style>
-    :root { --bg:#000; --card:#0f0f0f; --text:#fff; --muted:#bbb; --accent:#fff; --border:#222; --ok:#00e676; --warn:#ffd166; --err:#ff4d4d; }
+    :root {
+      --bg:#000; --card:#0f0f0f; --text:#fff; --muted:#bbb; --accent:#fff; --border:#222;
+      --ok:#00e676; --warn:#ffd166; --err:#ff4d4d;
+      --radius:12px;
+    }
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
-    header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;background:#000;z-index:2}
-    .brand{display:flex;align-items:center;gap:12px}
-    .brand img{width:50px;height:50px;border-radius:50%;border:2px solid #fff;object-fit:cover}
-    .brand h1{font-size:18px;margin:0}
-    .actions a, .actions form button{appearance:none;background:#111;border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;text-decoration:none;margin-left:8px;cursor:pointer}
-    .actions a:hover, .actions form button:hover{filter:brightness(1.2)}
-    main{max-width:1100px;margin:0 auto;padding:20px;display:grid;grid-template-columns:1fr;gap:16px}
+    html,body{height:100%}
+    body{
+      margin:0;background:var(--bg);color:var(--text);
+      font-family:system-ui, Segoe UI, Arial, sans-serif;
+      -webkit-text-size-adjust:100%;
+    }
+
+    /* Header */
+    header{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:12px 16px;border-bottom:1px solid var(--border);
+      position:sticky;top:0;background:#000;z-index:2;
+      gap:12px;
+    }
+    .brand{display:flex;align-items:center;gap:10px;min-width:0}
+    .brand img{
+      width:44px;height:44px;border-radius:50%;border:2px solid #fff;object-fit:cover;flex:0 0 auto
+    }
+    .brand h1{
+      font-size:clamp(14px,2.5vw,18px);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+    }
+    .actions{
+      display:flex;flex-wrap:wrap;align-items:center;gap:8px;justify-content:flex-end
+    }
+    .actions a, .actions form button{
+      appearance:none;background:#111;border:1px solid var(--border);color:#fff;
+      padding:8px 12px;border-radius:8px;text-decoration:none;cursor:pointer;line-height:1.2
+    }
+    .actions a:hover, .actions form button:hover{filter:brightness(1.15)}
+    .pill{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222;white-space:nowrap}
+
+    /* Layout */
+    main{max-width:1100px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr;gap:16px}
     @media(min-width:960px){ main{grid-template-columns:1fr 1fr} }
-    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px}
-    h2{margin:0 0 12px;font-size:18px}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    .grid .item{background:#111;border:1px solid var(--border);border-radius:8px;padding:12px}
+
+    .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+    h2{margin:0 0 12px;font-size:clamp(16px,2.5vw,18px)}
     .muted{color:var(--muted)}
+    .note{font-size:12px;color:#aaa;margin-top:6px}
+
+    /* Simple info grid */
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    @media(max-width:640px){ .grid{grid-template-columns:1fr} }
+    .grid .item{background:#111;border:1px solid var(--border);border-radius:8px;padding:12px}
+
     .status{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:#111}
     .dot{width:8px;height:8px;border-radius:50%}
     .dot.pending{background:var(--warn)}
     .dot.approved{background:var(--ok)}
-    label{font-size:14px;margin:8px 0 6px;display:block}
-    input,select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:#1a1a1a;color:#fff}
-    input[type=file]{padding:8px;background:#111}
+
+    label{font-size:14px;margin:10px 0 6px;display:block}
+    input,select{
+      width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);
+      background:#1a1a1a;color:#fff;font-size:16px; /* comfortable tap size */
+    }
+    input[type=file]{padding:10px;background:#111}
     .hint{font-size:12px;color:#aaa;margin-top:4px}
     .size-tag{font-size:12px;color:#bbb;margin-left:6px}
-    button.primary{margin-top:10px;width:100%;padding:12px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#000;font-weight:700;cursor:pointer}
+
+    button.primary{
+      margin-top:12px;width:100%;padding:14px;border-radius:10px;border:1px solid var(--accent);
+      background:var(--accent);color:#000;font-weight:800;cursor:pointer;font-size:16px
+    }
     button.primary:hover{filter:brightness(0.9)}
-    .btn, .btn-danger{appearance:none;border-radius:8px;border:1px solid var(--border);background:#111;color:#fff;padding:6px 10px;cursor:pointer}
-    .btn:hover{filter:brightness(1.2)}
-    .btn-danger{border-color:#532; background:#1a0000}
-    .btn-danger:hover{filter:brightness(1.2); background:#220000}
-    .icon{font-style:normal; margin-right:6px}
-    .note{font-size:13px;color:#aaa;margin-top:6px}
-    .pill{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222}
+    .btn, .btn-danger{
+      appearance:none;border-radius:8px;border:1px solid var(--border);background:#111;color:#fff;padding:8px 12px;cursor:pointer
+    }
+    .btn:hover{filter:brightness(1.15)}
+    .btn-danger{border-color:#532;background:#1a0000}
+    .btn-danger:hover{filter:brightness(1.15);background:#220000}
+    .icon{font-style:normal;margin-right:6px}
+
     .banner{border:1px solid var(--border);padding:12px 14px;border-radius:10px;margin:10px 0;background:#0b0b0b}
     .banner.ok{border-color:#124;border-left:4px solid var(--ok)}
     .banner.err{border-color:#412;border-left:4px solid var(--err)}
-    /* docs table */
+
+    /* ---------- Docs table: desktop ---------- */
     table.docs{width:100%;border-collapse:collapse;margin-top:8px}
-    table.docs th, table.docs td{border-bottom:1px dashed #222;padding:10px;vertical-align:middle}
+    table.docs th, table.docs td{border-bottom:1px dashed #222;padding:10px;vertical-align:middle;font-size:14px}
     table.docs th{color:#ddd;text-align:left;font-weight:600}
     .thumb{width:64px;height:64px;border:1px solid #222;border-radius:8px;object-fit:cover;background:#111}
     .empty{color:#999}
-    .doc-actions a, .doc-actions form button{color:#fff;text-decoration:none;border:1px solid #333;padding:6px 10px;border-radius:8px;background:#111}
-    .doc-actions a:hover, .doc-actions form button:hover{filter:brightness(1.2)}
-    .doc-actions{display:flex;gap:8px;align-items:center}
+    .doc-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+    /* ---------- Docs table: mobile transforms to cards ---------- */
+    @media (max-width: 700px){
+      table.docs thead{display:none}
+      table.docs, table.docs tbody, table.docs tr, table.docs td{display:block;width:100%}
+      table.docs tr{
+        border:1px solid #222;border-radius:10px;padding:10px;margin-bottom:12px;background:#0d0d0d
+      }
+      table.docs td{
+        display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:none;padding:8px 4px
+      }
+      table.docs td::before{
+        content:attr(data-col);
+        flex:0 0 auto;color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:.02em
+      }
+      table.docs td[data-col="Preview"]{justify-content:flex-start}
+      .thumb{width:56px;height:56px}
+      .doc-actions{width:100%;justify-content:flex-end;gap:8px}
+    }
+
+    /* Header responsiveness enhancements */
+    @media (max-width: 700px){
+      header{flex-wrap:wrap;padding:10px 12px}
+      .actions{width:100%;justify-content:flex-start}
+      .actions form{display:inline}
+    }
+
+    /* Make images/iframes inside content responsive */
+    img, video{max-width:100%;height:auto}
+
+    /* Improve focus/keyboard */
+    a, button, input, select{outline-color:var(--accent)}
+
+    /* Safe area for notches */
+    @supports (padding:max(0px)){
+      header{padding-left:max(12px, env(safe-area-inset-left)); padding-right:max(12px, env(safe-area-inset-right));}
+      main{padding-left:max(16px, env(safe-area-inset-left)); padding-right:max(16px, env(safe-area-inset-right));}
+    }
   </style>
 </head>
 <body>
@@ -102,16 +183,14 @@
         </div>
       </div>
 
-      <!-- 🔐 Telegram PIN banner (added here) -->
-  <!-- 🔐 Telegram PIN banner -->
-<% if (user && user.status === 'approved' && user.botPin) { %>
-  <div class="banner ok" style="margin-top:10px;border-left:4px solid #0f0;">
-    <strong>Telegram PIN:</strong>
-    <span style="font-size:18px;font-weight:800;letter-spacing:2px">****<%= user.botPin.slice(-2) %></span>
-    <div class="note">Use this PIN to log in to the VayaRide Driver Telegram bot.</div>
-  </div>
-<% } %>
-
+      <!-- 🔐 Telegram PIN banner -->
+      <% if (user && user.status === 'approved' && user.botPin) { %>
+        <div class="banner ok" style="margin-top:10px;border-left:4px solid #0f0;">
+          <strong>Telegram PIN:</strong>
+          <span style="font-size:18px;font-weight:800;letter-spacing:2px">****<%= user.botPin.slice(-2) %></span>
+          <div class="note">Use this PIN to log in to the VayaRide Driver Telegram bot.</div>
+        </div>
+      <% } %>
 
       <p class="note">If your status is <b>pending</b>, our team is reviewing your documents. You’ll be able to use the driver bot after approval.</p>
     </section>
@@ -143,13 +222,13 @@
             ['licenseDisc','License Disc'],
           ]; %>
 
-          <% rows.forEach(([key,label]) => { 
+          <% rows.forEach(([key,label]) => {
                const url = docs[key];
                const isImg = url && /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(url);
                const isPdf = url && /\.pdf(\?|$)/i.test(url);
           %>
             <tr>
-              <td>
+              <td data-col="Preview">
                 <% if (url && isImg) { %>
                   <img class="thumb" src="<%= url %>" alt="<%= label %>" />
                 <% } else if (url && isPdf) { %>
@@ -160,15 +239,15 @@
                   <div class="thumb" style="display:flex;align-items:center;justify-content:center;opacity:.5">—</div>
                 <% } %>
               </td>
-              <td><%= label %></td>
-              <td>
+              <td data-col="Document"><%= label %></td>
+              <td data-col="Status">
                 <% if (url) { %>
                   <span class="pill" style="border-color:#1f3;border-left:4px solid var(--ok)">Uploaded</span>
                 <% } else { %>
                   <span class="pill empty">Not uploaded</span>
                 <% } %>
               </td>
-              <td class="doc-actions">
+              <td data-col="Action" class="doc-actions">
                 <% if (url) { %>
                   <a class="btn" href="<%= url %>" target="_blank" rel="noopener">View</a>
                   <form action="/driver/delete-doc" method="POST" style="display:inline" onsubmit="return confirm('Delete this document?');">

@@ -1,31 +1,168 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <title><%= title %> • VayaRide</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <style>
-    body { margin:0; background:#000; color:#fff; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; display:flex; min-height:100vh; align-items:center; justify-content:center; }
-    .wrap { text-align:center; padding:24px; max-width:680px; }
-    img.logo { width:140px; height:140px; border-radius:50%; border:3px solid #fff; object-fit:cover; display:block; margin:0 auto 16px;}
-    h1 { margin:8px 0 4px; font-weight:700; letter-spacing:.5px; }
-    p { opacity:.9 }
-    .links { margin-top:20px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
-    a.btn { background:#fff; color:#000; padding:12px 18px; border-radius:8px; text-decoration:none; font-weight:600; }
-    a.btn:hover { background:#ddd; }
-    small { display:block; opacity:.75; margin-top:20px }
+    :root{
+      --bg:#000; --text:#fff; --muted:#cfcfcf; --border:#222; --accent:#fff;
+      --radius:14px;
+      --whatsapp:#25D366; --telegram:#0088cc;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      background:var(--bg); color:var(--text);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      display:flex; min-height:100vh; align-items:center; justify-content:center;
+      -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+    }
+    .wrap{
+      width:100%;
+      max-width:960px;
+      padding:24px clamp(16px, 3vw, 32px);
+      text-align:center;
+    }
+
+    /* Brand */
+    img.logo{
+      width:clamp(96px,12vw,140px);
+      height:clamp(96px,12vw,140px);
+      border-radius:50%;
+      border:3px solid var(--text); object-fit:cover;
+      display:block; margin:0 auto 16px;
+    }
+    h1{
+      margin:8px 0 6px; font-weight:800; letter-spacing:.5px;
+      font-size:clamp(22px, 3.5vw, 34px);
+      line-height:1.15;
+    }
+    p.lead{
+      margin:0 auto 14px; max-width:720px; opacity:.9;
+      font-size:clamp(14px, 2.4vw, 18px);
+    }
+
+    /* Video Card */
+    .video-card{
+      margin:18px auto 10px;
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      background:#0c0c0c;
+      padding:clamp(8px,1.2vw,12px);
+      box-shadow:0 0 0 3px rgba(255,255,255,0.04) inset;
+    }
+    .frame{
+      position:relative; overflow:hidden; border-radius:12px;
+      background:#000; border:1px solid #1a1a1a;
+      aspect-ratio:16/9;  /* keeps video responsive */
+    }
+    .frame video{
+      width:100%; height:100%; display:block; object-fit:cover;
+    }
+    .caption{
+      margin-top:10px; color:var(--muted); font-size:clamp(12px,1.8vw,13px);
+      letter-spacing:.02em;
+    }
+
+    /* CTA buttons */
+    .links{
+      margin-top:22px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;
+    }
+    a.btn{
+      padding:clamp(12px,1.8vw,14px) clamp(18px,2.4vw,22px);
+      border-radius:12px;
+      text-decoration:none;
+      font-weight:800;
+      font-size:clamp(15px,2.4vw,16px);
+      line-height:1.1;
+      display:inline-block;
+      border:1px solid transparent;
+      min-width:clamp(140px,20vw,180px);
+      box-shadow:0 4px 0 rgba(255,255,255,0.08);
+      transition:transform .06s ease, filter .15s ease;
+      will-change:transform;
+    }
+    a.btn:active{ transform:translateY(1px) }
+    a.btn:hover{ filter:brightness(0.92) }
+    a.btn.whatsapp{
+      background:var(--whatsapp); color:#000; border-color:var(--whatsapp);
+    }
+    a.btn.telegram{
+      background:var(--telegram); color:#fff; border-color:var(--telegram);
+    }
+    a.btn.driver{
+      background:var(--accent); color:#000; border-color:var(--accent);
+    }
+
+    /* small.note{display:block; opacity:.75; margin-top:16px} */
+
+    /* Narrow devices: stack CTAs */
+    @media (max-width: 480px){
+      .links{ flex-direction:column; align-items:stretch; gap:10px }
+      a.btn{ width:100% }
+    }
+
+    /* Motion accessibility */
+    @media (prefers-reduced-motion: reduce){
+      .frame video{ animation:none }
+      .links a{ transition:none }
+    }
+
+    /* Safe areas on notched phones */
+    @supports(padding:max(0px)){
+      .wrap{ padding-left:max(16px, env(safe-area-inset-left));
+             padding-right:max(16px, env(safe-area-inset-right)); }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <img class="logo" src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide" />
     <h1>VayaRide</h1>
-    <p>Move smarter. Drivers apply and riders ride—securely.</p>
+    <p class="lead">Move smarter. Drivers apply and riders ride—securely.</p>
+
+    <!-- Centered Video Section -->
+    <section class="video-card" aria-label="VayaRide preview video">
+      <div class="frame">
+        <video
+          src="/video.mp4"
+          autoplay
+          muted
+          loop
+          playsinline
+          preload="metadata"
+          aria-label="VayaRide in action demo video">
+          <source src="/video.mp4" type="video/mp4" />
+          Your browser does not support the video tag.
+        </video>
+      </div>
+      <div class="caption">A quick look at VayaRide in motion.</div>
+    </section>
+
+    <!-- CTAs -->
     <div class="links">
-      <a class="btn" href="/driver/register">Become a Driver</a>
-      <a class="btn" href="https://t.me/vayarider_bot" target="_blank" rel="noopener">Open Rider Bot</a>
+      <a class="btn driver" href="/driver/register">Become a Driver</a>
+      <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">📱 Book Now (WhatsApp)</a>
+      <a class="btn telegram" href="https://t.me/vayarider_bot" target="_blank" rel="noopener">🚖 Book Now (Telegram)</a>
     </div>
-    <small>Admin panel coming soon.</small>
+
+    <small class="note">Admin panel coming soon.</small>
   </div>
+
+  <script>
+    // Autoplay fallback: if autoplay is blocked, show controls
+    (function(){
+      const v = document.querySelector('video');
+      if (!v) return;
+      const p = v.play && v.play();
+      if (p && typeof p.then === 'function'){
+        p.catch(()=>{ v.controls = true; });
+      } else {
+        v.controls = true;
+      }
+    })();
+  </script>
 </body>
 </html>

@@ -22,12 +22,12 @@ import Driver from './src/models/Driver.js';
 import Rider from './src/models/Rider.js';
 import Admin from './src/models/Admin.js';
 import Activity from './src/models/Activity.js';
-
+import finishRouter from './src/routes/finish.js';
 import payfastNotifyRouter from './src/routes/payfastNotify.js';
 import partnerRouter from './src/routes/partner.js';
 /* ---- Bots ---- */
 import { initRiderBot, riderEvents, riderBot as RB } from './src/bots/riderBot.js';
-import { initDriverBot, driverEvents, driverBot as DB, notifyDriverRideFinished } from './src/bots/driverBot.js';
+import { initDriverBot, driverEvents, driverBot as DB } from './src/bots/driverBot.js';
 
 // import { notifyDriverRideFinished } from './src/bots/driverBot.js';
 import {
@@ -37,10 +37,13 @@ import {
   getConnectionStatus,
   sendWhatsAppMessage,
   resetWhatsAppSession,
+  notifyWhatsAppRiderToRate           // ⭐ add this
 } from './src/bots/whatsappBot.js';
+
 
 /* ---- Services ---- */
 import { assignNearestDriver, setEstimateOnRide, hasNumericChatId } from './src/services/assignment.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,7 +52,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new SocketIO(server, { cors: { origin: '*' } });
 app.set('io', io);
-
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const TRACK_LINK_TTL_HOURS = Number(process.env.TRACK_LINK_TTL_HOURS || 24);
 
@@ -74,7 +77,7 @@ app.use(express.urlencoded({ extended: true }));
 // after app.use(express.urlencoded({ extended: true }))
 app.use('/api/payfast', payfastNotifyRouter);
 app.use('/api/partner', partnerRouter);   // ← this path must match your redirect
-
+app.use(finishRouter);
 
 app.use(
   session({
@@ -143,7 +146,7 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
   try {
     const token = req.params.token;
     const pin = req.query.pin;
-    const rider = await Rider.findOne({ dashboardToken: token });
+    const rider = await Rider.findOne({ dashboardToken: token }).lean();
     if (!rider) return res.status(404).json({ error: 'Rider not found' });
 
     const now = new Date();
@@ -155,18 +158,25 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       return res.status(401).json({ error: 'Access denied. PIN or token expired' });
     }
 
-    // Robust id matching (covers legacy string vs number)
-    const idNum = Number(rider.chatId);
-    const idStr = String(rider.chatId);
+    // Build a safe ride-match filter depending on what identifiers we have
+    const orFilters = [];
+    const chatIdNum = Number(rider.chatId);
+    if (Number.isFinite(chatIdNum)) {
+      // support legacy string vs number
+      orFilters.push({ riderChatId: { $in: [chatIdNum, String(rider.chatId)] } });
+    }
+    if (rider.waJid) {
+      orFilters.push({ riderWaJid: rider.waJid });
+    }
+    const rideMatch = orFilters.length ? { $or: orFilters } : { _id: null }; // harmless no-match fallback
 
-    // Do both queries in parallel
-    const [lastPaid, tripsCompleted] = await Promise.all([
-      // Last payment/ride (tolerant: either explicitly paid, or completed)
+    // Parallel work
+    const [lastPaid, tripsCompleted, starsAgg] = await Promise.all([
+      // Last payment/ride (either explicitly paid, or completed)
       Ride.findOne({
-        riderChatId: { $in: [idNum, idStr] },
+        ...rideMatch,
         $or: [{ paymentStatus: 'paid' }, { status: 'completed' }]
       })
-        // Prefer paidAt, else completedAt, else updatedAt, else createdAt
         .sort({
           paidAt: -1,
           completedAt: -1,
@@ -175,11 +185,23 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
         })
         .lean(),
 
-      // Source of truth for Trips Completed
+      // Trips Completed
       Ride.countDocuments({
-        riderChatId: { $in: [idNum, idStr] },
+        ...rideMatch,
         status: 'completed'
-      })
+      }),
+
+      // ⭐ Driver → Rider ratings (use riderRating on Ride)
+      Ride.aggregate([
+        { $match: { ...rideMatch, riderRating: { $gte: 1 } } },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            avg: { $avg: '$riderRating' }
+          }
+        }
+      ])
     ]);
 
     const lastPayment = lastPaid
@@ -196,22 +218,30 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
         }
       : null;
 
+    const riderStars = starsAgg && starsAgg.length
+      ? { avg: Number(starsAgg[0].avg.toFixed(2)), count: starsAgg[0].count }
+      : { avg: null, count: 0 };
+
     // Disable caching so the dashboard always gets fresh data
     res.set('Cache-Control', 'no-store');
 
     return res.json({
-      chatId: rider.chatId,
-      name: rider.name,
-      email: rider.email,
-      credit: rider.credit,
-      trips: tripsCompleted,  // ✅ live count
-      lastPayment
+      platform: rider.platform || null,   // 'telegram' | 'whatsapp' | null
+      chatId: Number.isFinite(chatIdNum) ? chatIdNum : null,
+      waJid: rider.waJid || null,
+      name: rider.name || '',
+      email: rider.email || '',
+      credit: rider.credit ?? 0,
+      trips: tripsCompleted,
+      lastPayment,
+      riderStars // ← ⭐ added
     });
   } catch (e) {
     console.error('rider-by-token error:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 
 /* WhatsApp QR Code helpers */
@@ -748,73 +778,74 @@ app.post('/api/ride/:rideId/picked', async (req, res) => {
   }
 });
 
-/* ---- Minimal fare helpers for finish (same as you had) ---- */
-const RATE_TABLE = {
-  normal:  { baseFare: 0, perKm: 7,  minCharge: 30, withinKm: 30 },
-  comfort: { baseFare: 0, perKm: 8,  minCharge: 30, withinKm: 30 },
-  luxury:  { baseFare: 0, perKm: 12, minCharge: 45, withinKm: 45 },
-  xl:      { baseFare: 0, perKm: 10, minCharge: 39, withinKm: 40 }
-};
-function haversineKm(a, b){
-  if (!a || !b || typeof a.lat!=='number' || typeof a.lng!=='number' || typeof b.lat!=='number' || typeof b.lng!=='number') return 0;
-  const toRad = (x)=> x * Math.PI / 180;
-  const R = 6371; // km
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lng - a.lng);
-  const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
-  return 2 * R * Math.asin(Math.sqrt(s));
-}
-function pathLengthKm(path){
-  if (!Array.isArray(path) || path.length < 2) return 0;
-  let km = 0;
-  for (let i = 1; i < path.length; i++){
-    const p0 = path[i-1], p1 = path[i];
-    if (!p0 || !p1) continue;
-    km += haversineKm({lat:p0.lat, lng:p0.lng}, {lat:p1.lat, lng:p1.lng});
-  }
-  return km;
-}
-function expectedDurationSec(distanceKm, avgKph = 30){
-  const hours = distanceKm / Math.max(1, avgKph);
-  return Math.round(hours * 3600);
-}
-function priceFromRate(distanceKm, vehicleType='normal'){
-  const vt = RATE_TABLE[vehicleType] ? vehicleType : 'normal';
-  const rate = RATE_TABLE[vt];
-  const d = Math.max(0, Number(distanceKm || 0));
-  const within = rate.withinKm ?? 0;
-  const variable = d <= within ? 0 : (rate.perKm ?? 0) * (d - within);
-  const base = (rate.baseFare ?? 0) + (rate.minCharge ?? 0) + variable;
-  return Math.round(base);
-}
-async function computeFinalFare({
-  pickup,
-  destination,
-  vehicleType = 'normal',
-  path = null,
-  createdAt = null,
-  pickedAt = null,
-  completedAt = new Date()
-} = {}) {
-  let tripKm = 0;
-  if (Array.isArray(path) && path.length >= 2) tripKm = pathLengthKm(path);
-  else tripKm = haversineKm(pickup, destination) * 1.25;
+// /* ---- Minimal fare helpers for finish (same as you had) ---- */
+// const RATE_TABLE = {
+//   normal:  { baseFare: 0, perKm: 7,  minCharge: 30, withinKm: 30 },
+//   comfort: { baseFare: 0, perKm: 8,  minCharge: 30, withinKm: 30 },
+//   luxury:  { baseFare: 0, perKm: 12, minCharge: 45, withinKm: 45 },
+//   xl:      { baseFare: 0, perKm: 10, minCharge: 39, withinKm: 40 }
+// };
+// function haversineKm(a, b){
+//   if (!a || !b || typeof a.lat!=='number' || typeof a.lng!=='number' || typeof b.lat!=='number' || typeof b.lng!=='number') return 0;
+//   const toRad = (x)=> x * Math.PI / 180;
+//   const R = 6371; // km
+//   const dLat = toRad(b.lat - a.lat);
+//   const dLon = toRad(b.lng - a.lng);
+//   const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+//   return 2 * R * Math.asin(Math.sqrt(s));
+// }
+// function pathLengthKm(path){
+//   if (!Array.isArray(path) || path.length < 2) return 0;
+//   let km = 0;
+//   for (let i = 1; i < path.length; i++){
+//     const p0 = path[i-1], p1 = path[i];
+//     if (!p0 || !p1) continue;
+//     km += haversineKm({lat:p0.lat, lng:p0.lng}, {lat:p1.lat, lng:p1.lng});
+//   }
+//   return km;
+// }
+// function expectedDurationSec(distanceKm, avgKph = 30){
+//   const hours = distanceKm / Math.max(1, avgKph);
+//   return Math.round(hours * 3600);
+// }
+// function priceFromRate(distanceKm, vehicleType='normal'){
+//   const vt = RATE_TABLE[vehicleType] ? vehicleType : 'normal';
+//   const rate = RATE_TABLE[vt];
+//   const d = Math.max(0, Number(distanceKm || 0));
+//   const within = rate.withinKm ?? 0;
+//   const variable = d <= within ? 0 : (rate.perKm ?? 0) * (d - within);
+//   const base = (rate.baseFare ?? 0) + (rate.minCharge ?? 0) + variable;
+//   return Math.round(base);
+// }
+// async function computeFinalFare({
+//   pickup,
+//   destination,
+//   vehicleType = 'normal',
+//   path = null,
+//   createdAt = null,
+//   pickedAt = null,
+//   completedAt = new Date()
+// } = {}) {
+//   let tripKm = 0;
+//   if (Array.isArray(path) && path.length >= 2) tripKm = pathLengthKm(path);
+//   else tripKm = haversineKm(pickup, destination) * 1.25;
 
-  const startTs = pickedAt ? new Date(pickedAt).getTime() : (createdAt ? new Date(createdAt).getTime() : Date.now());
-  const endTs   = completedAt ? new Date(completedAt).getTime() : Date.now();
-  const actualDurationSecVal = Math.max(0, Math.round((endTs - startTs) / 1000));
-  const expectedSec = expectedDurationSec(tripKm, 30);
+//   const startTs = pickedAt ? new Date(pickedAt).getTime() : (createdAt ? new Date(createdAt).getTime() : Date.now());
+//   const endTs   = completedAt ? new Date(completedAt).getTime() : Date.now();
+//   const actualDurationSecVal = Math.max(0, Math.round((endTs - startTs) / 1000));
+//   const expectedSec = expectedDurationSec(tripKm, 30);
 
-  return {
-    price: priceFromRate(tripKm, vehicleType),
-    tripKm: Number(tripKm.toFixed(3)),
-    actualDurationSec: actualDurationSecVal,
-    expectedDurationSec: expectedSec,
-    trafficFactor: Number((expectedSec > 0 ? (actualDurationSecVal / expectedSec) : 1).toFixed(2)),
-    surge: 1.0
-  };
-}
+//   return {
+//     price: priceFromRate(tripKm, vehicleType),
+//     tripKm: Number(tripKm.toFixed(3)),
+//     actualDurationSec: actualDurationSecVal,
+//     expectedDurationSec: expectedSec,
+//     trafficFactor: Number((expectedSec > 0 ? (actualDurationSecVal / expectedSec) : 1).toFixed(2)),
+//     surge: 1.0
+//   };
+// }
 
+/* ---------------- Cancel Trip API (driver clicks Cancel) ---------------- */
 /* ---------------- Cancel Trip API (driver clicks Cancel) ---------------- */
 app.post('/api/ride/:rideId/cancel', async (req, res) => {
   try {
@@ -823,12 +854,13 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
     const ride = await Ride.findById(rideId);
     if (!ride) return res.status(404).json({ error: 'Ride not found' });
 
-    // grab the last known driver location (if any)
+    // last known driver location (if any)
     let cancelLat = null, cancelLng = null;
     if (ride.driverId) {
       const drv = await Driver.findById(ride.driverId).lean();
       if (drv?.location && typeof drv.location.lat === 'number' && typeof drv.location.lng === 'number') {
-        cancelLat = drv.location.lat; cancelLng = drv.location.lng;
+        cancelLat = drv.location.lat;
+        cancelLng = drv.location.lng;
         await appendPathPoint(ride._id, cancelLat, cancelLng, 'CANCEL');
       }
     }
@@ -842,12 +874,27 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       } catch {}
       ride.cancelledAt = new Date();
       ride.cancelledBy = 'driver';
+
+      // ⭐ compute & store cancel distance from pickup
+      if (cancelLat != null && cancelLng != null && ride.pickup?.lat && ride.pickup?.lng) {
+        // reuse your haversineMeters helper that's already in this file
+        const meters = haversineMeters(
+          { lat: ride.pickup.lat, lng: ride.pickup.lng },
+          { lat: cancelLat,      lng: cancelLng }
+        );
+        ride.cancelDriverLoc = { lat: cancelLat, lng: cancelLng };
+        ride.cancelDistanceKm = Number((meters / 1000).toFixed(2));
+      }
+
       await ride.save();
     }
 
-    // console log
+    // logs
     if (cancelLat != null && cancelLng != null) {
-      console.log(`❌ CANCELLED ride=${rideId} reason="${reason || ''}" lat=${cancelLat.toFixed(6)} lng=${cancelLng.toFixed(6)}`);
+      console.log(
+        `❌ CANCELLED ride=${rideId} reason="${reason || ''}" lat=${cancelLat.toFixed(6)} lng=${cancelLng.toFixed(6)}` +
+        (ride.cancelDistanceKm != null ? ` (~${ride.cancelDistanceKm} km from pickup)` : '')
+      );
     } else {
       console.log(`❌ CANCELLED ride=${rideId} reason="${reason || ''}" (no last driver coords)`);
     }
@@ -860,7 +907,8 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       const msg =
         `❌ <b>Your trip was cancelled by the driver.</b>\n` +
         `• Reason: <i>${cleanReason}</i>` +
-        (cleanNote ? `\n• Note: ${cleanNote}` : '');
+        (cleanNote ? `\n• Note: ${cleanNote}` : '') +
+        (ride.cancelDistanceKm != null ? `\n• Distance from pickup: ~${ride.cancelDistanceKm} km` : '');
       try { await riderBot.sendMessage(Number(riderChatId), msg, { parse_mode: 'HTML' }); } catch {}
     }
 
@@ -869,10 +917,19 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       type: 'cancelled',
       actorType: 'driver',
       message: `Ride cancelled (${reason || 'unspecified'})`,
-      meta: { reason: reason || null, note: note || null, lat: cancelLat, lng: cancelLng }
+      meta: {
+        reason: reason || null,
+        note: note || null,
+        lat: cancelLat,
+        lng: cancelLng,
+        cancelDistanceKm: ride.cancelDistanceKm ?? null
+      }
     });
 
-    io.emit(`ride:${rideId}:cancelled`, { reason: reason || null });
+    io.emit(`ride:${rideId}:cancelled`, {
+      reason: reason || null,
+      cancelDistanceKm: ride.cancelDistanceKm ?? null
+    });
 
     return res.json({ ok: true });
   } catch (err) {
@@ -881,90 +938,12 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
   }
 });
 
+
 /* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
 /* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
 /* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
-app.post('/api/ride/:rideId/finish', async (req, res) => {
-  try {
-    const { rideId } = req.params;
-    const { paidMethod } = req.body || {};
-    const ride = await Ride.findById(rideId);
-    if (!ride) return res.status(404).json({ error: 'Ride not found' });
-
-    // stamp final coords before computing/saving
-    let endLat = null, endLng = null;
-    if (ride.driverId) {
-      const drv = await Driver.findById(ride.driverId).lean();
-      if (drv?.location && typeof drv.location.lat === 'number' && typeof drv.location.lng === 'number') {
-        endLat = drv.location.lat; endLng = drv.location.lng;
-        await appendPathPoint(ride._id, endLat, endLng, 'FINISH');
-      }
-    }
-
-    const {
-      price,
-      tripKm,
-      actualDurationSec,
-      expectedDurationSec,
-      trafficFactor,
-      surge
-    } = await computeFinalFare({
-      pickup: ride.pickup,
-      destination: ride.destination,
-      vehicleType: ride.vehicleType || 'normal',
-      path: ride.path || null,
-      createdAt: ride.createdAt,
-      pickedAt: ride.pickedAt || ride.startedAt || ride.createdAt,
-      completedAt: new Date()
-    });
-
-    ride.status = 'completed';
-    ride.completedAt = new Date();
-
-    // ✅ normalize to 'cash' | 'payfast' only
-    ride.paymentMethod = (paidMethod === 'cash') ? 'cash' : 'payfast';
-
-    // ✅ ADDED: defensively mark cash rides as paid at finish
-    if (ride.paymentMethod === 'cash' && ride.paymentStatus !== 'paid') {
-      ride.paymentStatus = 'paid';
-      ride.paidAt = new Date();
-    }
-
-    ride.finalAmount = price;
-    ride.finalDistanceKm = tripKm;
-    ride.finalDurationSec = actualDurationSec;
-    ride.finalTrafficFactor = trafficFactor;
-    ride.finalSurge = surge;
-
-    await ride.save();
-
-    // ✅ refresh driver stats + DM their receipt
-    try { await notifyDriverRideFinished(ride._id); } catch {}
-
-    const locStr = (endLat != null && endLng != null)
-      ? `lat=${endLat.toFixed(6)} lng=${endLng.toFixed(6)}`
-      : 'no last driver coords';
-    console.log(`🏁 FINISHED ride=${rideId} method=${ride.paymentMethod} amount=R${price} dist=${tripKm.toFixed(2)}km dur=${actualDurationSec}s (${locStr})`);
-
-    io.emit(`ride:${rideId}:finished`, {
-      paidMethod: ride.paymentMethod,
-      amount: price,
-      distanceKm: tripKm
-    });
-
-    return res.json({
-      ok: true,
-      paidMethod: ride.paymentMethod,
-      paymentStatus: ride.paymentStatus,   // <- helpful for UI
-      amount: price,
-      distanceKm: tripKm,
-      durationSec: actualDurationSec
-    });
-  } catch (e) {
-    console.error('finish error', e);
-    res.status(500).json({ error: 'Failed to finish trip' });
-  }
-});
+/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
+/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
 
 
 /* ---------------- Socket.IO ---------------- */

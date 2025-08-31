@@ -91,6 +91,19 @@
     }
   }
 
+
+  function keepScreenAlive() {
+  setTimeout(() => {
+    // Prevent the browser from entering sleep mode
+    localStorage.setItem("keepScreenActive", "true");
+    window.dispatchEvent(new Event('storage')); // Trigger a storage event
+    keepScreenAlive(); // Re-run this function after 1 minute
+  }, 60000); // 1-minute interval
+}
+
+// Start keeping the screen active as soon as the page loads
+keepScreenAlive();
+
   function gotoTelegram(botUsername) {
     const tgUrl = `tg://resolve?domain=${botUsername}`;
     const webUrl = `https://t.me/${botUsername}`;

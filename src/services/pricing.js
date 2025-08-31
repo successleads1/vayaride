@@ -5,6 +5,9 @@ import Ride from '../models/Ride.js';
 
 /** Great-circle distance (Haversine) in KM */
 export function kmBetween(a, b) {
+  if (!a || !b || typeof a.lat !== 'number' || typeof a.lng !== 'number' || typeof b.lat !== 'number' || typeof b.lng !== 'number') {
+    return 0;
+  }
   const toRad = (x) => (x * Math.PI) / 180;
   const R = 6371; // km
   const dLat = toRad(b.lat - a.lat);
@@ -16,6 +19,24 @@ export function kmBetween(a, b) {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+/* ---------- Local helpers used by appendPathPoint ---------- */
+const lastPathByRide = new Map(); // rideId -> { lat, lng, ts }
+
+/** Haversine in meters (for movement threshold in appendPathPoint) */
+function haversineMeters(a, b) {
+  if (!a || !b || typeof a.lat !== 'number' || typeof a.lng !== 'number' || typeof b.lat !== 'number' || typeof b.lng !== 'number') {
+    return 0;
+  }
+  const toRad = (x) => (x * Math.PI) / 180;
+  const R = 6371000; // meters
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lng - a.lng);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(Math.max(0, s)));
 }
 
 /* ---------- ENV + Constants ---------- */
@@ -96,7 +117,6 @@ async function roadMetrics(pickup, destination) {
 
     const distMeters = elem.distance?.value ?? 0;
     const durSec = elem.duration?.value ?? 0;
-    // Avoid mixing ?? with ||
     const durTrafficSec = Math.max(1, (elem.duration_in_traffic?.value ?? durSec));
     const km = distMeters / 1000;
 
@@ -239,7 +259,7 @@ export async function getAvailableVehicleQuotes({ pickup, destination, radiusKm 
     let bestDrivers = [];
 
     for (const d of ds) {
-      const rate = resolveRate(vehicleType, d.pricing || {});
+      const rate = resolveRate(vehicleType, (d.pricing || {}));
       if (!rate.perKm || rate.perKm <= 0) {
         if (DEBUG_PRICING) console.log(`[quotes:skip] vt=${vehicleType} driver=${d._id} bad perKm=${rate.perKm}`);
         continue; // skip bad driver pricing
@@ -306,11 +326,13 @@ export async function computeFinalFare({
     let meters = 0;
     for (let i = 1; i < path.length; i++) {
       const a = path[i - 1], b = path[i];
+      if (!a || !b) continue;
       const dLat = toRad(b.lat - a.lat);
       const dLon = toRad(b.lng - a.lng);
-      const s = Math.sin(dLat/2)**2 +
-                Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) *
-                Math.sin(dLon/2)**2;
+      const s =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) *
+        Math.sin(dLon / 2) ** 2;
       meters += 2 * R * Math.asin(Math.sqrt(Math.max(0, s)));
     }
     tripKm = meters / 1000;
@@ -322,9 +344,10 @@ export async function computeFinalFare({
   const startTs = pickedAt ? new Date(pickedAt).getTime()
                            : (createdAt ? new Date(createdAt).getTime() : null);
   const endTs   = completedAt ? new Date(completedAt).getTime() : Date.now();
+  const fallbackSec = Math.round((tripKm / 30) * 3600); // fallback ~30km/h
   const actualDurationSec = (startTs && endTs && endTs >= startTs)
     ? Math.max(1, Math.round((endTs - startTs) / 1000))
-    : Math.max(1, Math.round((tripKm / 30) * 3600)); // fallback ~30km/h
+    : Math.max(1, fallbackSec);
 
   // expected duration + traffic factor snapshot
   const { durationSec: expectedDurationSec } = await roadMetrics(pickup, destination);
@@ -362,7 +385,10 @@ export async function computeFinalFare({
   }
 
   if (DEBUG_PRICING) {
-    console.log(`[finalFare] vt=${key} tripKm=${tripKm.toFixed(2)} actualSec=${actualDurationSec} expectedSec=${expected} traffic=${dynamicTrafficFactor.toFixed(2)} surge=${surge.toFixed(2)} waitPerMin=${WAIT_PER_MIN} => R${finalPrice}`);
+    console.log(
+      `[finalFare] vt=${key} tripKm=${tripKm.toFixed(2)} actualSec=${actualDurationSec} expectedSec=${expected} ` +
+      `traffic=${dynamicTrafficFactor.toFixed(2)} surge=${surge.toFixed(2)} waitPerMin=${WAIT_PER_MIN} => R${finalPrice}`
+    );
   }
 
   return {
@@ -373,4 +399,34 @@ export async function computeFinalFare({
     trafficFactor: dynamicTrafficFactor,
     surge
   };
+}
+
+/* ---------- Path appending (self-contained & safe) ---------- */
+export async function appendPathPoint(rideId, lat, lng, label = '') {
+  try {
+    if (!rideId || typeof lat !== 'number' || typeof lng !== 'number') return;
+
+    const key = String(rideId);
+    const now = Date.now();
+    const prev = lastPathByRide.get(key);
+
+    // Only write if moved far enough or enough time passed
+    const fastEnough = !prev || (now - prev.ts) >= 2500; // 2.5s min
+    const farEnough  = !prev || haversineMeters(prev, { lat, lng }) >= 8; // 8m min
+    if (!fastEnough && !farEnough) return;
+
+    await Ride.updateOne(
+      { _id: rideId },
+      { $push: { path: { lat, lng, ts: new Date() } } }
+    );
+
+    lastPathByRide.set(key, { lat, lng, ts: now });
+
+    if (label) {
+      console.log(`🧭 PATH ${label} ride=${key} lat=${lat.toFixed(6)} lng=${lng.toFixed(6)}`);
+    }
+  } catch (e) {
+    // Non-fatal
+    console.warn('appendPathPoint failed:', e?.message || e);
+  }
 }
