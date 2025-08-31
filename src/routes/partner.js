@@ -73,7 +73,7 @@ router.get('/upgrade/payfast', (req, res) => {
 
     <div class="actions">
       <button id="btn-payfast" class="payfast">💳 Pay with PayFast (Real)</button>
-      <button id="btn-ok">✅ Simulate PayFast SUCCESS</button>
+   
       <button id="btn-cancel" class="secondary">❌ Cancel (no notify)</button>
     </div>
 
