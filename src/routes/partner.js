@@ -5,8 +5,17 @@ const router = express.Router();
 
 /**
  * Local “landing” for upgrades.
- * - Can simulate a success (posts to /api/payfast/notify)
- * - Or redirect to your real Next.js gateway to PayFast
+ * Lets you:
+ *  - Simulate a success (posts to /api/payfast/notify)
+ *  - Or redirect to your real Next.js gateway to PayFast
+ *
+ * Real redirect base is now taken from env/local, NOT hard-coded:
+ *   - process.env.NEXT_GATEWAY_URL  (preferred)
+ *   - process.env.PUBLIC_URL        (fallback, e.g., ngrok)
+ *   - inferred http(s)://host       (last resort)
+ *
+ * If you want a hard default, set PUBLIC_URL in .env to:
+ *   https://7945a61c140e.ngrok-free.app
  */
 router.get('/upgrade/payfast', (req, res) => {
   const {
@@ -20,15 +29,16 @@ router.get('/upgrade/payfast', (req, res) => {
   } = req.query;
 
   // Local notify (for simulated success)
-  const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  const inferred = `${req.protocol}://${req.get('host')}`;
+  const base = (process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
   const notifyUrl = `${base}/api/payfast/notify`;
 
   // Telegram deep link (optional)
   const tgUser = process.env.TELEGRAM_RIDER_BOT_USERNAME || '';
 
-  // ✅ REAL redirect endpoint you asked to hardcode
-  // We’ll build a full URL on the client by appending the same query params
-  const payfastRedirectUrl = new URL('https://www.explore-capetown.co.za/api/partner/upgrade/payfast');
+  // ✅ REAL redirect endpoint — now built from env/local (no hard-coded domain)
+  const gatewayBase = (process.env.NEXT_GATEWAY_URL || process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
+  const payfastRedirectUrl = new URL(`${gatewayBase}/api/partner/upgrade/payfast`);
 
   res
     .set('Content-Type', 'text/html')
@@ -72,8 +82,8 @@ router.get('/upgrade/payfast', (req, res) => {
     <p class="muted">Choose either the real PayFast flow or simulate a success locally for development.</p>
 
     <div class="actions">
-      <button id="btn-payfast" class="payfast">💳 Pay with PayFast</button>
-   
+      <button id="btn-payfast" class="payfast">💳 Pay with PayFast (Real)</button>
+      <button id="btn-ok">✅ Simulate PayFast SUCCESS</button>
       <button id="btn-cancel" class="secondary">❌ Cancel (no notify)</button>
     </div>
 
@@ -102,7 +112,7 @@ router.get('/upgrade/payfast', (req, res) => {
     const companyName  = ${JSON.stringify(companyName || '')};
     const contactName  = ${JSON.stringify(contactName || '')};
 
-    // Hardcoded real redirect base you asked for
+    // Real redirect base built on server (env/local)
     const payfastRedirectUrl = new URL(${JSON.stringify(payfastRedirectUrl.toString())});
 
     // Append same params you used to open this page
@@ -114,7 +124,6 @@ router.get('/upgrade/payfast', (req, res) => {
       if (email)       u.searchParams.set('email', email);
       if (companyName) u.searchParams.set('companyName', companyName);
       if (contactName) u.searchParams.set('contactName', contactName);
-      // Optionally forward m_payment_id (your Next route may ignore it)
       if (m_payment_id) u.searchParams.set('m_payment_id', m_payment_id);
       return u.toString();
     }
@@ -146,7 +155,7 @@ router.get('/upgrade/payfast', (req, res) => {
         const body = new URLSearchParams({
           m_payment_id: m_payment_id || partnerId || '',
           payment_status: 'COMPLETE',
-          email_address: email   // echo email back to IPN (like real PayFast payload)
+          email_address: email
         });
         const r = await fetch(notifyUrl, {
           method: 'POST',
