@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 import morgan from 'morgan';
 import session from 'express-session';
 import bcrypt from 'bcrypt';
+import QRCode from 'qrcode';
 
 /* ---- Auth & Routers ---- */
 import passport from './src/auth/passport.js';
@@ -68,6 +69,39 @@ app.use(morgan('dev'));
 app.use(express.static(path.join(__dirname, 'public'))); // serves /wa-qr.png and /track.html
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Always produce a QR that points to vayaride.com (optionally a path)
+// GET /qr.png            -> QR for PUBLIC_URL
+// GET /qr.png?u=/promo   -> QR for PUBLIC_URL + "/promo"
+// GET /qr.png            -> QR for PUBLIC_URL
+// GET /qr.png?u=/promo   -> QR for PUBLIC_URL + "/promo"
+// GET /qr.png?u=https://vayaride.com/anything (strictly same-domain allowed)
+app.get('/qr.png', async (req, res) => {
+  try {
+    const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    let target = base;
+
+    const u = req.query.u;
+
+    // Allow relative paths like "/promo"
+    if (typeof u === 'string' && u.startsWith('/')) {
+      target = base + u;
+    }
+
+    // Allow full URLs only if they stay on your domain
+    if (typeof u === 'string' && /^https?:\/\//i.test(u)) {
+      try {
+        const parsed = new URL(u);
+        if (parsed.hostname.endsWith('vayaride.com')) target = parsed.toString();
+      } catch {}
+    }
+
+    res.type('png');
+    await QRCode.toFileStream(res, target, { width: 220, margin: 1 });
+  } catch {
+    res.status(500).send('QR error');
+  }
+});
+
 
 // Routes that expect parsed bodies must be before bots if you ever switch to webhooks
 app.use('/api/payfast', payfastNotifyRouter);   // /api/payfast/notify (ITN)
@@ -141,7 +175,12 @@ async function logActivity({
 }
 
 /* ---------------- Routes ---------------- */
-app.get('/', (req, res) => res.render('landing', { title: 'VayaRide' }));
+app.get('/', (req, res) => {
+  const publicUrl = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  res.render('landing', { title: 'VayaRide', publicUrl });
+});
+
+
 app.use('/driver', driverAuthRouter);
 app.use('/admin', adminRouter);
 
