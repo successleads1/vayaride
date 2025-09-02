@@ -22,9 +22,13 @@ import Driver from './src/models/Driver.js';
 import Rider from './src/models/Rider.js';
 import Admin from './src/models/Admin.js';
 import Activity from './src/models/Activity.js';
+
+/* ---- App routes ---- */
 import finishRouter from './src/routes/finish.js';
 import payfastNotifyRouter from './src/routes/payfastNotify.js';
 import partnerRouter from './src/routes/partner.js';
+import payfastRouter from './src/routes/payfast.js';
+import payfastGatewayRouter from './src/routes/payfastGateway.js';
 
 /* ---- Bots ---- */
 import { initRiderBot, riderEvents, riderBot as RB } from './src/bots/riderBot.js';
@@ -66,8 +70,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes that expect parsed bodies must be before bots if you ever switch to webhooks
-app.use('/api/payfast', payfastNotifyRouter);
-app.use('/api/partner', partnerRouter);
+app.use('/api/payfast', payfastNotifyRouter);   // /api/payfast/notify (ITN)
+app.use('/api/payfast', payfastGatewayRouter);  // /api/payfast/gateway (auto-post to PayFast)
+app.use('/api/partner', partnerRouter);         // /api/partner/upgrade/payfast (landing page)
+app.use('/pay', payfastRouter);                 // /pay/:rideId → redirect to landing
 app.use(finishRouter);
 
 app.use(
@@ -306,9 +312,6 @@ app.post('/driver-bot', (req, res) => {
   driverBot.processUpdate?.(req.body);
   res.sendStatus(200);
 });
-
-/* Pay route */
-app.use('/pay', (await import('./src/routes/payfast.js')).default);
 
 /* Map/track page (back-compat) */
 app.get('/map/:rideId', (req, res) => {
