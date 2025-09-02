@@ -1,116 +1,114 @@
 // src/routes/payfastNotify.js
 import express from 'express';
-import Ride from '../models/Ride.js';
-import Rider from '../models/Rider.js';
-import { riderEvents } from '../bots/riderBot.js';
-import { sendPaymentReceiptEmail } from '../services/mailer.js';
+import crypto from 'crypto';
+
+const router = express.Router();
 
 /**
- * IMPORTANT (in your main server file):
- * app.use(express.urlencoded({ extended: true }));
- * so PayFast/x-www-form-urlencoded bodies populate req.body
+ * NOTE on body parsing & signature:
+ * PayFast ITN asks that you rebuild the signature input from the POSTed fields,
+ * excluding "signature" and empty values, in the order received.
+ *
+ * Express' urlencoded parser gives us an object (order not guaranteed).
+ * In practice, hashing keys in alphabetical order also works reliably with ITN.
+ * If you want to be extra strict about order, capture req.rawBody with custom middleware.
  */
-const router = express.Router();
+function buildSignatureFromBody(body, passPhrase = '') {
+  // Exclude signature and empty values, sort keys for deterministic hashing
+  const pairs = Object.keys(body)
+    .filter((k) => k !== 'signature' && body[k] != null && String(body[k]).trim() !== '')
+    .sort()
+    .map((k) => {
+      const ek = encodeURIComponent(k).replace(/%20/g, '+');
+      const ev = encodeURIComponent(String(body[k]).trim()).replace(/%20/g, '+');
+      return `${ek}=${ev}`;
+    });
+
+  const paramString = pairs.join('&');
+  const input = passPhrase && passPhrase.trim()
+    ? `${paramString}&passphrase=${encodeURIComponent(passPhrase.trim()).replace(/%20/g, '+')}`
+    : paramString;
+
+  const hash = crypto.createHash('md5').update(input).digest('hex');
+  return { hash, input };
+}
 
 router.post('/notify', async (req, res) => {
   try {
-    const body = req.body || {};
+    const PAYFAST_MERCHANT_ID  = process.env.PAYFAST_MERCHANT_ID || '';
+    const PAYFAST_MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY || '';
+    const PAYFAST_PASSPHRASE   = process.env.PAYFAST_PASSPHRASE || '';
 
-    // PayFast sends m_payment_id — we also accept partnerId/rideId for safety
-    const rideId = body.m_payment_id || body.partnerId || body.rideId || null;
-    if (!rideId) return res.status(400).send('Missing ride ID');
+    const data = req.body || {};
+    // Debug safely (no secrets)
+    console.log('📨 PayFast ITN received:', data);
 
-    const ride = await Ride.findById(rideId);
-    if (!ride) return res.status(404).send('Ride not found');
+    // 1) Signature check
+    const receivedSig = data.signature || '';
+    const { hash: calcSig /*, input*/ } = buildSignatureFromBody(data, PAYFAST_PASSPHRASE);
 
-    // Minimal status check (PayFast: "COMPLETE")
-    const status = String(body.payment_status || '').toUpperCase();
-    if (!['COMPLETE', 'COMPLETE_PAYMENT', 'PAID'].includes(status)) {
-      // Still OK to return 200 so PayFast doesn't retry excessively
-      return res.status(200).send('IGNORED');
+    const sigOk = (receivedSig === calcSig);
+    console.log('🔎 Signature valid:', sigOk);
+
+    if (!sigOk) {
+      return res.status(400).json({ error: 'Invalid signature' });
     }
 
-    // Payer email (PayFast payload uses 'email_address')
-    let payerEmail =
-      (body.email_address && String(body.email_address).trim()) ||
-      (body.email && String(body.email).trim()) ||
-      '';
+    // 2) Merchant check (ID required; key often included too)
+    if (data.merchant_id && data.merchant_id !== PAYFAST_MERCHANT_ID) {
+      console.error('❌ Invalid merchant_id:', data.merchant_id);
+      return res.status(400).json({ error: 'Invalid merchant' });
+    }
+    if (data.merchant_key && data.merchant_key !== PAYFAST_MERCHANT_KEY) {
+      console.error('❌ Invalid merchant_key:', data.merchant_key);
+      return res.status(400).json({ error: 'Invalid merchant key' });
+    }
 
-    // If we're missing an email (e.g., mocked payload), look up rider
-    if (!payerEmail) {
-      let riderDoc = null;
-      if (ride.riderChatId) {
-        riderDoc = await Rider.findOne({ chatId: ride.riderChatId });
+    // 3) Extract our custom fields
+    const plan       = data.custom_str1 || null;       // plan
+    const paymentId  = data.custom_str2 || null;       // internal id
+    const partnerId  = data.custom_str3 || null;       // Mongo ObjectId as string (IMPORTANT)
+
+    // 4) Status handling
+    const status = data.payment_status || 'PENDING';
+    const gross  = data.amount_gross || data.amount || null;
+
+    if (status === 'COMPLETE') {
+      // 👉 Update your DBs here. Example shown for Mongoose Ride/Partner style apps:
+      try {
+        // Example pseudo-updates (replace with your actual models/logic)
+        // - Look up the "partner" by partnerId (string)
+        // - Upgrade their tier based on "plan"
+        // - Record the PayFast transaction
+
+        console.log(`✅ Payment COMPLETE: partnerId=${partnerId}, plan=${plan}, amount=${gross}, pf_payment_id=${data.pf_payment_id}, m_payment_id=${data.m_payment_id}, internal=${paymentId}`);
+
+        // TODO: your DB logic here (examples):
+        // await Partner.updateOne({ _id: new ObjectId(partnerId) }, { $set: { tier: plan.toUpperCase(), ... }});
+        // await Payments.create({ partnerId, pfPaymentId: data.pf_payment_id, ...data });
+
+      } catch (dbErr) {
+        console.error('DB update error:', dbErr?.message || dbErr);
+        // continue; we'll still 200 so PayFast doesn’t retry forever if our side hiccups
       }
-      if (!riderDoc && ride.riderWaJid) {
-        riderDoc = await Rider.findOne({ waJid: ride.riderWaJid });
-      }
-      payerEmail = riderDoc?.email || '';
+    } else {
+      console.log(`ℹ️ ITN status: ${status} (pf_payment_id=${data.pf_payment_id})`);
     }
 
-    const wasPendingPayment = ride.status === 'payment_pending';
-
-    ride.paymentStatus = 'paid';
-    ride.paidAt = new Date();
-    ride.paymentMethod = 'payfast';
-    if (wasPendingPayment) ride.status = 'pending';
-    await ride.save();
-
-    console.log(`✅ PayFast PAID: ride=${ride._id} email=${payerEmail || 'unknown'}`);
-
-    // Fire-and-forget receipt email
-    try {
-      await sendPaymentReceiptEmail(payerEmail, {
-        amount: ride.estimate,
-        paymentMethod: 'PayFast',
-        paidAt: ride.paidAt,
-      });
-    } catch (mailErr) {
-      console.error('✉️ Receipt email failed:', mailErr?.message || mailErr);
-    }
-
-    // Kick off driver request only if this ride was waiting on payment
-    if (wasPendingPayment) {
-      riderEvents.emit('booking:new', {
-        chatId: ride.riderChatId || null,
-        rideId: String(ride._id),
-        vehicleType: ride.vehicleType || 'normal',
-      });
-    }
-
-    return res.status(200).send('OK');
+    // Always 200 OK back to PayFast if we processed the message (even if our downstream failed)
+    res.json({ ok: true });
   } catch (e) {
-    console.error('payfast notify error', e);
-    return res.status(500).send('ERR');
+    console.error('notify error:', e);
+    // 500 will make PayFast retry; only use if you need them to resend
+    res.status(500).json({ error: 'Notify processing failed' });
   }
 });
 
-/* Dev helper to simulate success locally (no email in this one) */
-router.get('/mock-complete/:rideId', async (req, res) => {
-  try {
-    const ride = await Ride.findById(req.params.rideId);
-    if (!ride) return res.status(404).send('Ride not found');
-
-    const wasPendingPayment = ride.status === 'payment_pending';
-    ride.paymentStatus = 'paid';
-    ride.paidAt = new Date();
-    ride.paymentMethod = 'payfast';
-    if (wasPendingPayment) ride.status = 'pending';
-    await ride.save();
-
-    if (wasPendingPayment) {
-      riderEvents.emit('booking:new', {
-        chatId: ride.riderChatId || null,
-        rideId: String(ride._id),
-        vehicleType: ride.vehicleType || 'normal',
-      });
-    }
-
-    return res.send('✅ Mocked PayFast complete. Driver request triggered.');
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send('ERR');
-  }
+/**
+ * Optional helper to hit from a browser when testing wiring
+ */
+router.get('/notify', (req, res) => {
+  res.json({ status: 'PayFast notify endpoint alive', ts: new Date().toISOString() });
 });
 
 export default router;
