@@ -115,10 +115,86 @@ export async function sendPaymentReceiptEmail(riderEmail, paymentDetails) {
 }
 
 /**
- * Send a welcome email (driver)
- * @param {string} driverEmail - required
- * @param {{ name?: string, vehicleType?: 'normal'|'comfort'|'luxury'|'xl' }} [opts]
+ * Send a payment failed/cancelled email (rider)
+ * @param {string} riderEmail - required
+ * @param {{ amount?:number, reason?:string }} details
  */
+export async function sendPaymentFailedEmail(riderEmail, details = {}) {
+  if (!riderEmail) {
+    console.warn('❌ No riderEmail provided, skipping failure email.');
+    return;
+  }
+
+  const { amount = 0, reason = 'Your payment was not completed.' } = details;
+  console.log('✉️ sendPaymentFailedEmail ->', {
+    to: maskEmail(riderEmail),
+    amount: Number(amount || 0),
+    reason,
+  });
+
+  const emailHtml = `
+    <!doctype html>
+    <html><head><meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>Payment Not Completed - VayaRide</title>
+    <style>
+      body{font-family:Arial,Helvetica,sans-serif;background:#fff;color:#000;margin:0}
+      .wrap{max-width:600px;margin:0 auto;padding:24px}
+      .card{border:2px solid #000;border-radius:14px;padding:24px}
+      .header{text-align:center;padding-bottom:16px;border-bottom:2px solid #000}
+      .logo{width:90px;height:90px;border-radius:50%;border:2px solid #000;display:block;margin:0 auto}
+      h1{margin:14px 0 0;font-size:22px}
+      .blk{background:#000;color:#fff;border-radius:12px;margin-top:20px;padding:16px}
+      .blk h2{margin:0 0 10px;font-size:16px}
+      ul{margin:0;padding-left:18px}
+      .footer{margin-top:18px;text-align:center;font-size:12px;color:#555}
+    </style></head>
+    <body>
+      <div class="wrap">
+        <div class="card">
+          <div class="header">
+            <img class="logo" src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide"/>
+            <h1>Payment Not Completed</h1>
+            <p><strong>VayaRide</strong></p>
+          </div>
+
+          <p>${reason}</p>
+
+          <div class="blk">
+            <h2>Details</h2>
+            <ul>
+              <li><strong>Attempted Amount:</strong> R${Number(amount || 0).toFixed(2)}</li>
+              <li><strong>Status:</strong> Failed/Cancelled</li>
+            </ul>
+          </div>
+
+          <p style="margin-top:16px">You can try again anytime from the app. If you need help, just reply to this email.</p>
+
+          <div class="footer">
+            © ${new Date().getFullYear()} VayaRide — All Rights Reserved
+          </div>
+        </div>
+      </div>
+    </body></html>
+  `;
+
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: riderEmail,
+    subject: 'Your VayaRide Payment Was Not Completed',
+    html: emailHtml,
+  };
+
+  try {
+    console.log('📨 Sending email (failed) to', maskEmail(mailOptions.to), 'subject:', mailOptions.subject);
+    const info = await transporter.sendMail(mailOptions);
+    console.log('✅ Failure email sent:', { messageId: info?.messageId, to: maskEmail(riderEmail) });
+  } catch (error) {
+    console.error('❌ Error sending failed payment email:', error?.message || error, error?.stack ? '\n' + error.stack : '');
+  }
+}
+
+// retained export if you use it elsewhere
 export async function sendDriverWelcomeEmail(driverEmail, opts = {}) {
   if (!driverEmail) {
     console.warn('❌ No driverEmail provided, skipping welcome email.');
