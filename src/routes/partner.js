@@ -28,7 +28,7 @@ router.get('/upgrade/payfast', (req, res) => {
 
   // ✅ REAL redirect endpoint you asked to hardcode
   // We’ll build a full URL on the client by appending the same query params
-  const payfastRedirectUrl = new URL('https://www.explore-capetown.co.za/api/partner/upgrade/payfast');
+  const payfastRedirectUrl = new URL('https://vayaridee.onrender.com/api/partner/upgrade/payfast');
 
   res
     .set('Content-Type', 'text/html')
