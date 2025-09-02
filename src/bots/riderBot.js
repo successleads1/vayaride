@@ -12,11 +12,7 @@ export const riderEvents = new EventEmitter();
 
 // ---- Singleton container (survives duplicate imports) ----
 if (!globalThis.__riderBotSingleton) {
-  globalThis.__riderBotSingleton = {
-    bot: null,
-    wired: false,
-    started: false,
-  };
+  globalThis.__riderBotSingleton = { bot: null, wired: false, started: false };
 }
 
 let riderBot = globalThis.__riderBotSingleton.bot;
@@ -29,17 +25,58 @@ if (!token) throw new Error('TELEGRAM_RIDER_BOT_TOKEN is not defined in .env');
 const PUBLIC_URL = process.env.PUBLIC_URL || '';
 const RIDER_WEBHOOK_PATH = process.env.TELEGRAM_RIDER_WEBHOOK_PATH || '/telegram/rider';
 
+// ✅ Force ZA by default; can override via env
 const GMAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
-const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || ''; // e.g. "country:za" or "country:za|country:na"
+const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || 'country:za';
+const GMAPS_LANGUAGE = process.env.GOOGLE_MAPS_LANGUAGE || 'en-ZA';
+const GMAPS_REGION = process.env.GOOGLE_MAPS_REGION || 'za';
+
+// South Africa centroid (for biasing)
+const ZA_CENTER = { lat: -28.4793, lng: 24.6727 };
+const ZA_RADIUS_M = 1_500_000; // ~1500km
 
 /* ---------- In-memory state per chat ---------- */
 const riderState = new Map();
 
 /* ---------- Utils ---------- */
 const crop = (s, n = 48) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '');
-const isLikelyAddress = (t) => !!(t && /[a-z]/i.test(t) && (/\d/.test(t) || /\s/.test(t)));
 const generatePIN = () => Math.floor(1000 + Math.random() * 9000).toString();
 const generateToken = () => crypto.randomBytes(24).toString('hex');
+
+/* ---------- Shortcut expansions (UCT/UWC/CPUT/etc.) ---------- */
+const ZA_SHORTCUTS = {
+  uct: 'University of Cape Town',
+  uwc: 'University of the Western Cape',
+  cput: 'Cape Peninsula University of Technology',
+  wits: 'University of the Witwatersrand',
+  uj: 'University of Johannesburg',
+  up: 'University of Pretoria',
+  ukzn: 'University of KwaZulu-Natal',
+  nwu: 'North-West University',
+  unisa: 'University of South Africa',
+  stellenbosch: 'Stellenbosch University',
+  ru: 'Rhodes University'
+};
+function expandShortcut(raw = '') {
+  const key = String(raw).trim().toLowerCase();
+  return ZA_SHORTCUTS[key] || raw;
+}
+function boostToZA(raw = '') {
+  const q = String(raw).trim();
+  if (q.length <= 5) return `${q} South Africa`;
+  return q;
+}
+
+/* ---------- Looser address detector (accepts acronyms) ---------- */
+function isLikelyQuery(t) {
+  if (!t) return false;
+  const s = String(t).trim();
+  if (!/[a-z]/i.test(s)) return false;
+  if (/\d/.test(s) || /\s/.test(s)) return true;     // street-like
+  if (s.length >= 3) return true;                    // short tokens like "uct"
+  if (ZA_SHORTCUTS[s.toLowerCase()]) return true;    // explicit shortcut
+  return false;
+}
 
 /* ---------- Rating UI helper ---------- */
 function riderStarsKeyboard(rideId) {
@@ -50,34 +87,55 @@ function riderStarsKeyboard(rideId) {
   return { reply_markup: { inline_keyboard: [row] } };
 }
 
-/* ---------- Google helpers ---------- */
+/* ---------- Google helpers (ZA-restricted) ---------- */
 async function gmapsAutocomplete(input, { sessiontoken } = {}) {
   if (!GMAPS_KEY) return [];
+  const expanded = expandShortcut(input);
+  const maybeBoosted = boostToZA(expanded);
+
   const u = new URL('https://maps.googleapis.com/maps/api/place/autocomplete/json');
-  u.searchParams.set('input', input);
+  u.searchParams.set('input', maybeBoosted);
   u.searchParams.set('key', GMAPS_KEY);
-  u.searchParams.set('types', 'geocode');
-  if (GMAPS_COMPONENTS) u.searchParams.set('components', GMAPS_COMPONENTS);
+  u.searchParams.set('components', GMAPS_COMPONENTS); // country:za
+  u.searchParams.set('language', GMAPS_LANGUAGE);     // en-ZA
+  u.searchParams.set('region', GMAPS_REGION);         // za
+  u.searchParams.set('location', `${ZA_CENTER.lat},${ZA_CENTER.lng}`);
+  u.searchParams.set('radius', String(ZA_RADIUS_M));
+  u.searchParams.set('strictbounds', 'true');
   if (sessiontoken) u.searchParams.set('sessiontoken', sessiontoken);
+
   try {
     const r = await fetch(u.toString());
     const j = await r.json();
     if (j.status !== 'OK' && j.status !== 'ZERO_RESULTS') {
       console.warn('gmapsAutocomplete status', j.status, j.error_message);
     }
-    return Array.isArray(j.predictions) ? j.predictions : [];
+    let preds = Array.isArray(j.predictions) ? j.predictions : [];
+
+    if (!preds.length && expanded === input) {
+      const u2 = new URL(u);
+      u2.searchParams.set('input', `${expanded} South Africa`);
+      const r2 = await fetch(u2.toString());
+      const j2 = await r2.json();
+      preds = Array.isArray(j2.predictions) ? j2.predictions : [];
+    }
+    return preds;
   } catch (e) {
     console.warn('gmapsAutocomplete error', e?.message || e);
     return [];
   }
 }
+
 async function gmapsPlaceLatLng(placeId, { sessiontoken } = {}) {
   if (!GMAPS_KEY) return null;
   const u = new URL('https://maps.googleapis.com/maps/api/place/details/json');
   u.searchParams.set('place_id', placeId);
   u.searchParams.set('fields', 'geometry/location,name,formatted_address');
   u.searchParams.set('key', GMAPS_KEY);
+  u.searchParams.set('language', GMAPS_LANGUAGE);
+  u.searchParams.set('region', GMAPS_REGION);
   if (sessiontoken) u.searchParams.set('sessiontoken', sessiontoken);
+
   try {
     const r = await fetch(u.toString());
     const j = await r.json();
@@ -87,11 +145,12 @@ async function gmapsPlaceLatLng(placeId, { sessiontoken } = {}) {
     }
     const loc = j.result?.geometry?.location;
     if (!loc) return null;
+    const addr = j.result?.formatted_address || j.result?.name || '';
     return {
-      lat: loc.lat,
-      lng: loc.lng,
+      lat: Number(loc.lat),
+      lng: Number(loc.lng),
       name: j.result?.name || '',
-      address: j.result?.formatted_address || ''
+      address: addr
     };
   } catch (e) {
     console.warn('gmapsPlaceLatLng error', e?.message || e);
@@ -156,19 +215,22 @@ function askDrop(chatId) {
     }
   );
 }
+
 async function showAddressSuggestions(chatId, predictions, kind) {
   if (!predictions.length) {
-    await riderBot.sendMessage(chatId, '😕 No matching addresses found. Try refining your address or send live location with the 📎 button.');
+    await riderBot.sendMessage(
+      chatId,
+      '😕 No matching addresses found in South Africa. Try refining your address or send live location with the 📎 button.'
+    );
     if (kind === 'pickup') await askPickup(chatId); else await askDrop(chatId);
     return;
   }
-  const kb = predictions.slice(0, 8).map((p) => ([{
-    text: crop(p.description, 56),
-    callback_data: `${kind === 'pickup' ? 'pick' : 'drop'}_place:${p.place_id}`
-  }]));
+  const kb = predictions.slice(0, 8).map((p, i) => ([
+    { text: crop(p.description, 56), callback_data: `${kind === 'pickup' ? 'pick_idx' : 'drop_idx'}:${i}` }
+  ]));
   await riderBot.sendMessage(
     chatId,
-    `🔎 Select your ${kind === 'pickup' ? 'pickup' : 'destination'} address:\n(Or send your live location with 📎)`,
+    `🔎 Select your ${kind === 'pickup' ? 'pickup' : 'destination'} address (ZA):\n(Or send your live location with 📎)`,
     { reply_markup: { inline_keyboard: kb } }
   );
 }
@@ -286,10 +348,12 @@ function wireRiderHandlers() {
 
     const st = riderState.get(chatId);
     if (st && (st.step === 'awaiting_pickup' || st.step === 'awaiting_drop')) {
-      if (text && isLikelyAddress(text)) {
+      const typed = (msg.text || '').trim();
+      if (typed && isLikelyQuery(typed)) {
         const sessiontoken = crypto.randomBytes(16).toString('hex');
-        const preds = await gmapsAutocomplete(text, { sessiontoken });
+        const preds = await gmapsAutocomplete(typed, { sessiontoken });
         st.gmapsSession = sessiontoken;
+        st.predictions = preds; // save for index callback
         riderState.set(chatId, st);
         await showAddressSuggestions(chatId, preds, st.step === 'awaiting_pickup' ? 'pickup' : 'drop');
         return;
@@ -319,12 +383,87 @@ function wireRiderHandlers() {
         return;
       }
 
+      /* ======= NEW: pickup/destination via short indices ======= */
+      if (data.startsWith('pick_idx:')) {
+        const idx = Number(data.split(':')[1] || -1);
+        const st = riderState.get(chatId) || { step: 'awaiting_pickup' };
+        const arr = Array.isArray(st.predictions) ? st.predictions : [];
+        const choice = arr[idx];
+        if (!choice?.place_id) {
+          await riderBot.sendMessage(chatId, '⚠️ Selection expired. Please type your pickup again or share your location.');
+          return askPickup(chatId);
+        }
+        const loc = await gmapsPlaceLatLng(choice.place_id, { sessiontoken: st.gmapsSession });
+        if (!loc) {
+          await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
+          return askPickup(chatId);
+        }
+        st.pickup = { lat: loc.lat, lng: loc.lng };
+        st.step = 'awaiting_drop';
+        st.predictions = [];
+        riderState.set(chatId, st);
+        await riderBot.sendMessage(chatId, `✅ Pickup set to: ${loc.address || `(${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)})`}`);
+        return askDrop(chatId);
+      }
+
+      if (data.startsWith('drop_idx:')) {
+        const idx = Number(data.split(':')[1] || -1);
+        const st = riderState.get(chatId);
+        if (!st || !st.pickup) {
+          riderState.set(chatId, { step: 'awaiting_pickup' });
+          await riderBot.sendMessage(chatId, '⚠️ Session expired. Please set pickup again.');
+          return askPickup(chatId);
+        }
+        const arr = Array.isArray(st.predictions) ? st.predictions : [];
+        const choice = arr[idx];
+        if (!choice?.place_id) {
+          await riderBot.sendMessage(chatId, '⚠️ Selection expired. Please type your destination again or share your location.');
+          return askDrop(chatId);
+        }
+        const loc = await gmapsPlaceLatLng(choice.place_id, { sessiontoken: st.gmapsSession });
+        if (!loc) {
+          await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
+          return askDrop(chatId);
+        }
+
+        st.destination = { lat: loc.lat, lng: loc.lng };
+        st.step = 'selecting_vehicle';
+        st.predictions = [];
+        riderState.set(chatId, st);
+
+        let quotes = [];
+        try {
+          quotes = await getAvailableVehicleQuotes({
+            pickup: st.pickup,
+            destination: st.destination,
+            radiusKm: 30
+          });
+        } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
+
+        if (!quotes.length) {
+          st.step = 'awaiting_pickup';
+          riderState.set(chatId, st);
+          await riderBot.sendMessage(chatId, '😞 No drivers are currently available nearby. Please try again.');
+          return askPickup(chatId);
+        }
+
+        const toLabel = (vt) => vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
+        const keyboard = quotes.map((q) => ([{ text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }]));
+        st.dynamicQuotes = quotes;
+        riderState.set(chatId, st);
+
+        await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
+        return;
+      }
+      /* ======= END new index handlers ======= */
+
+      // Back-compat: old long payloads (safe to keep)
       if (data.startsWith('pick_place:')) {
         const placeId = data.split(':')[1];
         const st = riderState.get(chatId) || { step: 'awaiting_pickup' };
         const loc = await gmapsPlaceLatLng(placeId, { sessiontoken: st.gmapsSession });
         if (!loc) {
-          await riderBot.sendMessage(chatId, '❌ Could not resolve that address. Please try again or send your location.');
+          await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
           return askPickup(chatId);
         }
         st.pickup = { lat: loc.lat, lng: loc.lng };
@@ -344,7 +483,7 @@ function wireRiderHandlers() {
         }
         const loc = await gmapsPlaceLatLng(placeId, { sessiontoken: st.gmapsSession });
         if (!loc) {
-          await riderBot.sendMessage(chatId, '❌ Could not resolve that address. Please try again or send your location.');
+          await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
           return askDrop(chatId);
         }
 
