@@ -5,13 +5,8 @@ const router = express.Router();
 
 /**
  * Local “landing” for upgrades.
- * Lets you:
- *  - Simulate a success (posts to /api/payfast/notify)
- *  - Or redirect to your real PayFast redirect route (/pay/:id)
- *
- * Real redirect base is taken from env/local, NOT hard-coded:
- *   - process.env.PUBLIC_URL        (preferred)
- *   - inferred http(s)://host       (last resort)
+ * - Can simulate a success (posts to /api/payfast/notify)
+ * - Or redirect to your real Next.js gateway to PayFast
  */
 router.get('/upgrade/payfast', (req, res) => {
   const {
@@ -25,12 +20,15 @@ router.get('/upgrade/payfast', (req, res) => {
   } = req.query;
 
   // Local notify (for simulated success)
-  const inferred = `${req.protocol}://${req.get('host')}`;
-  const base = (process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
+  const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
   const notifyUrl = `${base}/api/payfast/notify`;
 
   // Telegram deep link (optional)
   const tgUser = process.env.TELEGRAM_RIDER_BOT_USERNAME || '';
+
+  // ✅ REAL redirect endpoint you asked to hardcode
+  // We’ll build a full URL on the client by appending the same query params
+  const payfastRedirectUrl = new URL('https://www.explore-capetown.co.za/api/partner/upgrade/payfast');
 
   res
     .set('Content-Type', 'text/html')
@@ -83,7 +81,7 @@ router.get('/upgrade/payfast', (req, res) => {
 
     <div class="debug">
       <div><b>Local Notify URL (mock):</b> ${notifyUrl}</div>
-      <div><b>Real Redirect Builder:</b> /pay/:id</div>
+      <div><b>Real Redirect Builder:</b> ${payfastRedirectUrl.toString()}</div>
       <div><b>Telegram bot:</b> ${tgUser || '—'}</div>
     </div>
   </div>
@@ -98,11 +96,27 @@ router.get('/upgrade/payfast', (req, res) => {
     const notifyUrl    = ${JSON.stringify(notifyUrl)};
     const tgUser       = ${JSON.stringify(tgUser)};
     const email        = ${JSON.stringify(email || '')};
+    const partnerId    = ${JSON.stringify(partnerId || '')};
+    const plan         = ${JSON.stringify(plan || 'basic')};
+    const amount       = ${JSON.stringify(amount || '0.00')};
+    const companyName  = ${JSON.stringify(companyName || '')};
+    const contactName  = ${JSON.stringify(contactName || '')};
 
-    // 👉 REAL PayFast flow: call /pay/:id which does the redirect server-side
+    // Hardcoded real redirect base you asked for
+    const payfastRedirectUrl = new URL(${JSON.stringify(payfastRedirectUrl.toString())});
+
+    // Append same params you used to open this page
     function buildRealRedirectUrl() {
-      if (!m_payment_id) throw new Error('missing ride/payment id');
-      return \`${base}/pay/\${encodeURIComponent(m_payment_id)}\`;
+      const u = new URL(payfastRedirectUrl);
+      if (partnerId)   u.searchParams.set('partnerId', partnerId);
+      if (plan)        u.searchParams.set('plan', plan);
+      if (amount)      u.searchParams.set('amount', amount);
+      if (email)       u.searchParams.set('email', email);
+      if (companyName) u.searchParams.set('companyName', companyName);
+      if (contactName) u.searchParams.set('contactName', contactName);
+      // Optionally forward m_payment_id (your Next route may ignore it)
+      if (m_payment_id) u.searchParams.set('m_payment_id', m_payment_id);
+      return u.toString();
     }
 
     function goBackToTelegram() {
@@ -112,6 +126,7 @@ router.get('/upgrade/payfast', (req, res) => {
       setTimeout(() => { try { window.close(); } catch(e) {} }, 1200);
     }
 
+    // 👉 REAL PayFast flow
     btnPayfast.onclick = () => {
       try {
         const url = buildRealRedirectUrl();
@@ -123,14 +138,15 @@ router.get('/upgrade/payfast', (req, res) => {
       }
     };
 
+    // 👉 LOCAL SIMULATE SUCCESS
     btnOk.onclick = async () => {
       btnOk.disabled = true;
       msg.textContent = 'Notifying server…';
       try {
         const body = new URLSearchParams({
-          m_payment_id: m_payment_id || '',
+          m_payment_id: m_payment_id || partnerId || '',
           payment_status: 'COMPLETE',
-          email_address: email
+          email_address: email   // echo email back to IPN (like real PayFast payload)
         });
         const r = await fetch(notifyUrl, {
           method: 'POST',
