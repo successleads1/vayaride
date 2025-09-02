@@ -169,7 +169,7 @@ router.get('/upgrade/payfast', (req, res) => {
     <p class="muted">Choose either the real PayFast flow or simulate success locally.</p>
 
     <div class="actions">
-      <button id="btn-payfast" class="payfast">💳 Pay with PayFast (Real)</button>
+      <button id="btn-payfast" class="payfast">💳 Pay with PayFast</button>
    
       <button id="btn-cancel" class="secondary">❌ Cancel</button>
     </div>
