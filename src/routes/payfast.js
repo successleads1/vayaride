@@ -6,19 +6,20 @@ import Rider from '../models/Rider.js';
 const router = express.Router();
 
 /**
- * Redirects to your Next.js PayFast gateway:
- *   <NEXT_GATEWAY_BASE>/api/partner/upgrade/payfast
- * NEXT_GATEWAY_BASE is pulled from:
- *   - process.env.NEXT_GATEWAY_URL  (preferred)
- *   - process.env.PUBLIC_URL        (fallback, e.g., your ngrok)
- *   - inferred http(s)://host       (last resort)
+ * GET /pay/:rideId
+ * Resolves ride & rider, then redirects to the landing page with all params
+ * Landing page base prefers:
+ *   1) process.env.NEXT_GATEWAY_URL  (use this to point to your Next app if desired)
+ *   2) process.env.PUBLIC_URL
+ *   3) inferred request origin
  */
 router.get('/:rideId', async (req, res) => {
   try {
-    const ride = await Ride.findById(req.params.rideId);
+    const rideId = req.params.rideId;
+    const ride = await Ride.findById(rideId);
     if (!ride) return res.status(404).send('Ride not found');
 
-    // Resolve rider email
+    // Resolve rider email (Telegram or WhatsApp)
     let riderEmail = '';
     if (ride.riderChatId) {
       const r = await Rider.findOne({ chatId: ride.riderChatId });
@@ -28,24 +29,27 @@ router.get('/:rideId', async (req, res) => {
       const r = await Rider.findOne({ waJid: ride.riderWaJid });
       riderEmail = r?.email || '';
     }
-    if (!riderEmail) riderEmail = 'user@mail.com'; // safe fallback
+    if (!riderEmail) riderEmail = 'user@mail.com';
 
-    const inferred = `${req.protocol}://${req.get('host')}`;
-    const gatewayBase = (process.env.NEXT_GATEWAY_URL || process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
-    const url = new URL(`${gatewayBase}/api/partner/upgrade/payfast`);
+    // Amount: prefer finalAmount, fallback to estimate
+    const amount = Number(ride.finalAmount ?? ride.estimate ?? 0).toFixed(2);
 
-    // Forward required params to your Next.js route
-    url.searchParams.set('m_payment_id', ride._id.toString()); // optional hint
+    const inferred = `${req.protocol}://${req.get('host')}`.replace(/\/+$/, '');
+    const baseLanding = (process.env.NEXT_GATEWAY_URL || process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
+    const url = new URL('/api/partner/upgrade/payfast', baseLanding);
+
+    // Forward params
+    url.searchParams.set('m_payment_id', ride._id.toString());
     url.searchParams.set('partnerId', ride._id.toString());
     url.searchParams.set('plan', ride.vehicleType || 'basic');
-    url.searchParams.set('amount', Number(ride.estimate || 0).toFixed(2));
+    url.searchParams.set('amount', amount);
     url.searchParams.set('email', riderEmail);
     url.searchParams.set('companyName', 'TelegramRider');
     url.searchParams.set('contactName', 'Telegram Rider');
 
     return res.redirect(url.toString());
   } catch (e) {
-    console.error('payfast route error', e);
+    console.error('payfast entry error', e);
     return res.status(500).send('ERR');
   }
 });
