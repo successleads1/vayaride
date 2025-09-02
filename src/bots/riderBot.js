@@ -10,16 +10,27 @@ import Rider from '../models/Rider.js';
 
 export const riderEvents = new EventEmitter();
 
-/* ---------- Env ---------- */
+// ---- Singleton container (survives duplicate imports) ----
+if (!globalThis.__riderBotSingleton) {
+  globalThis.__riderBotSingleton = {
+    bot: null,
+    wired: false,
+    started: false,
+  };
+}
+
+let riderBot = globalThis.__riderBotSingleton.bot;
+let ioRef = null;
+
+const MODE = process.env.TELEGRAM_MODE || 'polling'; // 'polling' | 'webhook'
 const token = process.env.TELEGRAM_RIDER_BOT_TOKEN;
 if (!token) throw new Error('TELEGRAM_RIDER_BOT_TOKEN is not defined in .env');
 
 const PUBLIC_URL = process.env.PUBLIC_URL || '';
+const RIDER_WEBHOOK_PATH = process.env.TELEGRAM_RIDER_WEBHOOK_PATH || '/telegram/rider';
+
 const GMAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || ''; // e.g. "country:za" or "country:za|country:na"
-
-let riderBot = null;
-let ioRef = null;
 
 /* ---------- In-memory state per chat ---------- */
 const riderState = new Map();
@@ -30,21 +41,13 @@ const isLikelyAddress = (t) => !!(t && /[a-z]/i.test(t) && (/\d/.test(t) || /\s/
 const generatePIN = () => Math.floor(1000 + Math.random() * 9000).toString();
 const generateToken = () => crypto.randomBytes(24).toString('hex');
 
-/* ---------- Rating UI helper (parser-safe) ---------- */
+/* ---------- Rating UI helper ---------- */
 function riderStarsKeyboard(rideId) {
   const row = Array.from({ length: 5 }, (_, i) => {
     const n = i + 1;
-    return {
-      text: '★'.repeat(n),
-      callback_data: `rate_driver:${rideId}:${n}`
-    };
+    return { text: '★'.repeat(n), callback_data: `rate_driver:${rideId}:${n}` };
   });
-
-  return {
-    reply_markup: {
-      inline_keyboard: [row] // a single row with 5 buttons
-    }
-  };
+  return { reply_markup: { inline_keyboard: [row] } };
 }
 
 /* ---------- Google helpers ---------- */
@@ -53,7 +56,7 @@ async function gmapsAutocomplete(input, { sessiontoken } = {}) {
   const u = new URL('https://maps.googleapis.com/maps/api/place/autocomplete/json');
   u.searchParams.set('input', input);
   u.searchParams.set('key', GMAPS_KEY);
-  u.searchParams.set('types', 'geocode'); // addresses
+  u.searchParams.set('types', 'geocode');
   if (GMAPS_COMPONENTS) u.searchParams.set('components', GMAPS_COMPONENTS);
   if (sessiontoken) u.searchParams.set('sessiontoken', sessiontoken);
   try {
@@ -68,7 +71,6 @@ async function gmapsAutocomplete(input, { sessiontoken } = {}) {
     return [];
   }
 }
-
 async function gmapsPlaceLatLng(placeId, { sessiontoken } = {}) {
   if (!GMAPS_KEY) return null;
   const u = new URL('https://maps.googleapis.com/maps/api/place/details/json');
@@ -101,7 +103,7 @@ async function gmapsPlaceLatLng(placeId, { sessiontoken } = {}) {
 async function sendDashboardLink(chatId) {
   const dashboardToken = generateToken();
   const dashboardPin = generatePIN();
-  const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
+  const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
   await Rider.findOneAndUpdate(
     { chatId },
@@ -117,7 +119,7 @@ async function sendDashboardLink(chatId) {
   );
 }
 
-/* ---------- Persistence of live rider location ---------- */
+/* ---------- Live rider location ---------- */
 async function emitRiderLocation(chatId, loc) {
   await Rider.findOneAndUpdate(
     { chatId },
@@ -154,25 +156,16 @@ function askDrop(chatId) {
     }
   );
 }
-
-async function showAddressSuggestions(chatId, predictions, kind /* 'pickup'|'drop' */) {
+async function showAddressSuggestions(chatId, predictions, kind) {
   if (!predictions.length) {
-    await riderBot.sendMessage(
-      chatId,
-      '😕 No matching addresses found. Try refining your address or send live location with the 📎 button.'
-    );
-    if (kind === 'pickup') await askPickup(chatId);
-    else await askDrop(chatId);
+    await riderBot.sendMessage(chatId, '😕 No matching addresses found. Try refining your address or send live location with the 📎 button.');
+    if (kind === 'pickup') await askPickup(chatId); else await askDrop(chatId);
     return;
   }
-
-  const kb = predictions.slice(0, 8).map((p) => ([
-    {
-      text: crop(p.description, 56),
-      callback_data: `${kind === 'pickup' ? 'pick' : 'drop'}_place:${p.place_id}`
-    }
-  ]));
-
+  const kb = predictions.slice(0, 8).map((p) => ([{
+    text: crop(p.description, 56),
+    callback_data: `${kind === 'pickup' ? 'pick' : 'drop'}_place:${p.place_id}`
+  }]));
   await riderBot.sendMessage(
     chatId,
     `🔎 Select your ${kind === 'pickup' ? 'pickup' : 'destination'} address:\n(Or send your live location with 📎)`,
@@ -182,10 +175,9 @@ async function showAddressSuggestions(chatId, predictions, kind /* 'pickup'|'dro
 
 /* ---------- Wire handlers once ---------- */
 function wireRiderHandlers() {
-  if (wireRiderHandlers._wired) return;
-  wireRiderHandlers._wired = true;
+  if (globalThis.__riderBotSingleton.wired) return;
+  globalThis.__riderBotSingleton.wired = true;
 
-  /* /start */
   riderBot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     riderState.delete(chatId);
@@ -212,7 +204,6 @@ function wireRiderHandlers() {
       });
     }
 
-    // ⭐ Nudge if they have an unrated completed trip in last 48h
     try {
       const since = new Date(Date.now() - 48 * 3600 * 1000);
       const lastUnrated = await Ride.findOne({
@@ -223,20 +214,15 @@ function wireRiderHandlers() {
       }).sort({ completedAt: -1 }).lean();
 
       if (lastUnrated?._id) {
-        await riderBot.sendMessage(
-          chatId,
-          'Please rate your last driver:',
-          riderStarsKeyboard(String(lastUnrated._id))
-        );
+        await riderBot.sendMessage(chatId, 'Please rate your last driver:', {
+          reply_markup: riderStarsKeyboard(String(lastUnrated._id)).reply_markup
+        });
       }
     } catch {}
   });
 
-  /* Registration flow + free text + location */
   riderBot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-
-    // Any time the rider shares a location, persist it
     if (msg.location) {
       const { latitude, longitude } = msg.location;
       await emitRiderLocation(chatId, { lat: latitude, lng: longitude });
@@ -245,7 +231,6 @@ function wireRiderHandlers() {
     const state = riderState.get(chatId);
     const text = (msg.text || '').trim();
 
-    // Registration steps
     if (state && state.step) {
       if (state.step === 'awaiting_name' && text) {
         state.name = text;
@@ -261,12 +246,10 @@ function wireRiderHandlers() {
       }
       if (state.step === 'awaiting_credit' && text) {
         const credit = parseFloat(text);
-        if (Number.isNaN(credit)) {
-          return riderBot.sendMessage(chatId, '❌ Invalid amount. Enter a number.');
-        }
-        const dashboardToken = generateToken();
-        const dashboardPin = generatePIN(); // <-- fixed
+        if (Number.isNaN(credit)) return riderBot.sendMessage(chatId, '❌ Invalid amount. Enter a number.');
 
+        const dashboardToken = crypto.randomBytes(24).toString('hex');
+        const dashboardPin = Math.floor(1000 + Math.random() * 9000).toString();
         const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
         await Rider.findOneAndUpdate(
@@ -301,7 +284,6 @@ function wireRiderHandlers() {
       }
     }
 
-    // Address autocomplete for pickup/drop steps
     const st = riderState.get(chatId);
     if (st && (st.step === 'awaiting_pickup' || st.step === 'awaiting_drop')) {
       if (text && isLikelyAddress(text)) {
@@ -312,11 +294,10 @@ function wireRiderHandlers() {
         await showAddressSuggestions(chatId, preds, st.step === 'awaiting_pickup' ? 'pickup' : 'drop');
         return;
       }
-      if (!msg.location) return; // ignore non-address text
+      if (!msg.location) return;
     }
   });
 
-  /* Inline buttons */
   riderBot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const data = query.data || '';
@@ -338,7 +319,6 @@ function wireRiderHandlers() {
         return;
       }
 
-      /* ---- Autocomplete selections ---- */
       if (data.startsWith('pick_place:')) {
         const placeId = data.split(':')[1];
         const st = riderState.get(chatId) || { step: 'awaiting_pickup' };
@@ -372,7 +352,6 @@ function wireRiderHandlers() {
         st.step = 'selecting_vehicle';
         riderState.set(chatId, st);
 
-        // Dynamic quotes based on available drivers nearby
         let quotes = [];
         try {
           quotes = await getAvailableVehicleQuotes({
@@ -380,9 +359,7 @@ function wireRiderHandlers() {
             destination: st.destination,
             radiusKm: 30
           });
-        } catch (e) {
-          console.error('getAvailableVehicleQuotes failed:', e);
-        }
+        } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
 
         if (!quotes.length) {
           st.step = 'awaiting_pickup';
@@ -391,24 +368,15 @@ function wireRiderHandlers() {
           return askPickup(chatId);
         }
 
-        const toLabel = (vt) =>
-          vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
-
-        const keyboard = quotes.map((q) => ([
-          { text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }
-        ]));
-
+        const toLabel = (vt) => vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
+        const keyboard = quotes.map((q) => ([{ text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }]));
         st.dynamicQuotes = quotes;
         riderState.set(chatId, st);
 
-        await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', {
-          reply_markup: { inline_keyboard: keyboard }
-        });
+        await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
         return;
       }
 
-      /* ---- Vehicle chosen ----
-         data: 'veh:<vehicleType>:<price>' */
       if (data.startsWith('veh:')) {
         const [, vehicleType, priceStr] = data.split(':');
         const price = Number(priceStr);
@@ -452,17 +420,14 @@ function wireRiderHandlers() {
         return;
       }
 
-      /* ---- Cash selected → set payment + dispatch ---- */
       if (data.startsWith('pay_cash_')) {
         const rideId = data.replace('pay_cash_', '');
         const ride = await Ride.findById(rideId);
         if (!ride) return;
 
-        // ✅ treat cash as paid in the mock
         ride.paymentMethod = 'cash';
         ride.paymentStatus = 'paid';
         ride.paidAt = new Date();
-
         ride.status = 'pending';
         ride.platform = 'telegram';
         await ride.save();
@@ -470,43 +435,27 @@ function wireRiderHandlers() {
         const st = riderState.get(chatId);
         const vehicleType = st?.chosenVehicleType || ride.vehicleType;
 
-        riderEvents.emit('booking:new', {
-          chatId,
-          rideId: String(ride._id),
-          vehicleType
-        });
+        riderEvents.emit('booking:new', { chatId, rideId: String(ride._id), vehicleType });
 
         await riderBot.sendMessage(chatId, '✅ Cash selected. Requesting your driver now.');
         riderState.delete(chatId);
         return;
       }
 
-      // ⭐⭐ Rating callback: rider rates driver
+      // ⭐ rider rates driver
       if (data.startsWith('rate_driver:')) {
         const [, rideId, starsStr] = data.split(':');
         const stars = Number(starsStr);
-        if (!(stars >= 1 && stars <= 5)) {
-          try { await riderBot.answerCallbackQuery(query.id, { text: 'Invalid rating' }); } catch {}
-          return;
-        }
+        if (!(stars >= 1 && stars <= 5)) { try { await riderBot.answerCallbackQuery(query.id, { text: 'Invalid rating' }); } catch {} return; }
 
         const ride = await Ride.findById(rideId);
-        if (!ride) {
-          try { await riderBot.answerCallbackQuery(query.id, { text: 'Ride not found' }); } catch {}
-          return;
-        }
+        if (!ride) { try { await riderBot.answerCallbackQuery(query.id, { text: 'Ride not found' }); } catch {} return; }
+        if (String(ride.riderChatId) !== String(chatId)) { try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your ride' }); } catch {} return; }
 
-        if (String(ride.riderChatId) !== String(chatId)) {
-          try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your ride' }); } catch {}
-          return;
-        }
-
-        // Save rating (rider → driver)
         ride.driverRating = stars;
         ride.driverRatedAt = new Date();
         await ride.save();
 
-        // Refresh driver aggregates
         try {
           if (ride.driverId) {
             const { default: Driver } = await import('../models/Driver.js');
@@ -526,7 +475,6 @@ function wireRiderHandlers() {
     }
   });
 
-  /* Live location while picking pickup/drop */
   riderBot.on('location', async (msg) => {
     const chatId = msg.chat.id;
     const { latitude, longitude } = msg.location || {};
@@ -550,17 +498,12 @@ function wireRiderHandlers() {
       state.destination = coords;
       state.step = 'selecting_vehicle';
 
-      // dynamic quotes from nearby drivers
       let quotes = [];
       try {
         quotes = await getAvailableVehicleQuotes({
-          pickup: state.pickup,
-          destination: state.destination,
-          radiusKm: 30
+          pickup: state.pickup, destination: state.destination, radiusKm: 30
         });
-      } catch (e) {
-        console.error('getAvailableVehicleQuotes failed:', e);
-      }
+      } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
 
       if (!quotes.length) {
         state.step = 'awaiting_pickup';
@@ -569,18 +512,12 @@ function wireRiderHandlers() {
         return askPickup(chatId);
       }
 
-      const toLabel = (vt) =>
-        vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
-
-      const keyboard = quotes.map((q) => ([
-        { text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }
-      ]));
+      const toLabel = (vt) => vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
+      const keyboard = quotes.map((q) => ([{ text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }]));
       state.dynamicQuotes = quotes;
       riderState.set(chatId, state);
 
-      await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', {
-        reply_markup: { inline_keyboard: keyboard }
-      });
+      await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
     }
   });
 
@@ -595,40 +532,53 @@ function wireRiderHandlers() {
 /* ---------- Notifier: ask rider to rate driver (exported) ---------- */
 export async function notifyRiderToRateDriver(ride) {
   try {
-    const chatId = ride.riderChatId;           // Telegram riders only
+    const chatId = ride.riderChatId;
     if (!chatId) return;
-
-    await riderBot.sendMessage(
-      chatId,
-      'Your trip is complete. Please rate your driver:',
-      riderStarsKeyboard(String(ride._id))
-    );
+    await riderBot.sendMessage(chatId, 'Your trip is complete. Please rate your driver:', riderStarsKeyboard(String(ride._id)));
   } catch (e) {
     console.warn('notifyRiderToRateDriver failed:', e?.message || e);
   }
 }
 
 /* ---------- Init ---------- */
-export function initRiderBot(io) {
-  if (riderBot) {
-    ioRef = io || ioRef;
-    console.log('🤖 Rider bot already initialized');
+export function initRiderBot({ io, app } = {}) {
+  ioRef = io || ioRef;
+
+  if (globalThis.__riderBotSingleton.started && riderBot) {
+    console.log('🤖 Rider bot already initialized (singleton)');
     return riderBot;
   }
-  ioRef = io || null;
 
-  riderBot = new TelegramBot(token, {
-    polling: {
-      interval: 300,
-      autoStart: true,
-      params: {
-        timeout: 10,
-        allowed_updates: ['message', 'edited_message', 'callback_query']
+  const tokenTail = token.slice(-6);
+  if (MODE === 'webhook') {
+    if (!app) throw new Error('Rider bot webhook mode requires an Express app instance');
+    if (!PUBLIC_URL) throw new Error('PUBLIC_URL must be set for webhook mode');
+
+    riderBot = new TelegramBot(token, { polling: false });
+    riderBot.setWebHook(`${PUBLIC_URL}${RIDER_WEBHOOK_PATH}`)
+      .then(() => console.log(`🤖 Rider webhook set (pid=${process.pid}, token=***${tokenTail}, path=${RIDER_WEBHOOK_PATH})`))
+      .catch((e) => console.error('Rider setWebHook error:', e));
+
+    app.post(RIDER_WEBHOOK_PATH, (req, res) => {
+      riderBot.processUpdate(req.body);
+      res.sendStatus(200);
+    });
+  } else {
+    riderBot = new TelegramBot(token, {
+      polling: {
+        interval: 300,
+        autoStart: true,
+        params: { timeout: 10, allowed_updates: ['message', 'edited_message', 'callback_query'] }
       }
-    }
-  });
+    });
+    console.log(`🤖 Starting rider bot polling (pid=${process.pid}, token=***${tokenTail})`);
+  }
+
+  globalThis.__riderBotSingleton.bot = riderBot;
+  globalThis.__riderBotSingleton.started = true;
 
   wireRiderHandlers();
+
   console.log('🤖 Rider bot initialized');
   return riderBot;
 }

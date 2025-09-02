@@ -1,13 +1,11 @@
-// src/bots/whatsappBot.js
-import pkg from '@whiskeysockets/baileys';
-const {
-  makeWASocket,
-  fetchLatestBaileysVersion,
+// ✅ Correct ESM imports for Baileys
+import makeWASocket, {
   useMultiFileAuthState,
+  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   DisconnectReason,
   delay
-} = pkg;
+} from '@whiskeysockets/baileys';
 
 import fs from 'fs';
 import path from 'path';
@@ -17,6 +15,10 @@ import qrcode from 'qrcode';
 import EventEmitter from 'events';
 import axios from 'axios';
 import crypto from 'crypto';
+
+// optional: control terminal QR with env var
+const SHOW_QR = process.env.WA_SHOW_QR === '1';
+
 
 import Ride from '../models/Ride.js';
 import Rider from '../models/Rider.js';
@@ -33,7 +35,10 @@ const ROOT_DIR = path.resolve(process.cwd());
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
-const AUTH_DIR = path.resolve(ROOT_DIR, 'baileys_auth_info');
+const AUTH_DIR = process.env.WA_AUTH_DIR
+  ? path.resolve(process.env.WA_AUTH_DIR)
+  : path.resolve(ROOT_DIR, 'baileys_auth_info'); // fallback for local
+
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
@@ -269,22 +274,24 @@ async function setupClient() {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr) {
-        currentQR = qr;
-        try {
-          const term = await qrcode.toString(qr, { type: 'terminal', small: true });
-          console.log('\n' + term);
-        } catch {
-          console.log('Open /qrcode to scan via browser.');
-        }
-        try {
-          const dataUrl = await qrcode.toDataURL(qr);
-          await saveQrPng(dataUrl);
-          waEvents.emit('qr', dataUrl);
-        } catch (e) {
-          logger.warn('WA: could not create QR dataURL: %s', e?.message || e);
-        }
-      }
+  if (qr) {
+  currentQR = qr;
+  if (SHOW_QR) {
+    try {
+      const term = await qrcode.toString(qr, { type: 'terminal', small: true });
+      console.log('\n' + term);
+    } catch {
+      console.log('Open /qrcode to scan via browser.');
+    }
+  }
+  try {
+    const dataUrl = await qrcode.toDataURL(qr);
+    await saveQrPng(dataUrl);
+    waEvents.emit('qr', dataUrl);
+  } catch (e) {
+    logger.warn('WA: could not create QR dataURL: %s', e?.message || e);
+  }
+}
 
       if (connection === 'open') {
         currentQR = null;

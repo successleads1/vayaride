@@ -25,11 +25,10 @@ import Activity from './src/models/Activity.js';
 import finishRouter from './src/routes/finish.js';
 import payfastNotifyRouter from './src/routes/payfastNotify.js';
 import partnerRouter from './src/routes/partner.js';
+
 /* ---- Bots ---- */
 import { initRiderBot, riderEvents, riderBot as RB } from './src/bots/riderBot.js';
 import { initDriverBot, driverEvents, driverBot as DB } from './src/bots/driverBot.js';
-
-// import { notifyDriverRideFinished } from './src/bots/driverBot.js';
 import {
   initWhatsappBot,
   waitForQrDataUrl,
@@ -37,13 +36,11 @@ import {
   getConnectionStatus,
   sendWhatsAppMessage,
   resetWhatsAppSession,
-  notifyWhatsAppRiderToRate           // ⭐ add this
+  notifyWhatsAppRiderToRate           // (kept import)
 } from './src/bots/whatsappBot.js';
-
 
 /* ---- Services ---- */
 import { assignNearestDriver, setEstimateOnRide, hasNumericChatId } from './src/services/assignment.js';
-
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,13 +57,6 @@ const TRACK_LINK_TTL_HOURS = Number(process.env.TRACK_LINK_TTL_HOURS || 24);
 await mongoose.connect(process.env.MONGODB_URI);
 console.log('✅ MongoDB connected');
 
-/* ---------------- Init Bots ---------------- */
-initWhatsappBot();
-const riderBot = initRiderBot(io);
-const driverBot = initDriverBot(io);
-console.log('🤖 Rider bot initialized');
-console.log('🚗 Driver bot initialized');
-
 /* ---------------- App setup ---------------- */
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'src/views'));
@@ -74,9 +64,10 @@ app.use(morgan('dev'));
 app.use(express.static(path.join(__dirname, 'public'))); // serves /wa-qr.png and /track.html
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-// after app.use(express.urlencoded({ extended: true }))
+
+// Routes that expect parsed bodies must be before bots if you ever switch to webhooks
 app.use('/api/payfast', payfastNotifyRouter);
-app.use('/api/partner', partnerRouter);   // ← this path must match your redirect
+app.use('/api/partner', partnerRouter);
 app.use(finishRouter);
 
 app.use(
@@ -89,7 +80,6 @@ app.use(
 );
 app.use(passport.initialize());
 app.use(passport.session());
-
 app.use((req, res, next) => { res.locals.user = req.user || null; next(); });
 
 /* ---------------- Seed Admin (optional) ---------------- */
@@ -110,6 +100,13 @@ async function ensureSeedAdmin() {
   console.log('🛡️ Seeded admin:', ADMIN_EMAIL);
 }
 await ensureSeedAdmin();
+
+/* ---------------- Init Bots (AFTER middleware) ---------------- */
+initWhatsappBot();
+const riderBot = initRiderBot(io);
+const driverBot = initDriverBot(io);
+console.log('🤖 Rider bot initialized');
+console.log('🚗 Driver bot initialized');
 
 /* ---------------- Helper: log + broadcast to admin ---------------- */
 async function logActivity({
@@ -158,21 +155,17 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       return res.status(401).json({ error: 'Access denied. PIN or token expired' });
     }
 
-    // Build a safe ride-match filter depending on what identifiers we have
     const orFilters = [];
     const chatIdNum = Number(rider.chatId);
     if (Number.isFinite(chatIdNum)) {
-      // support legacy string vs number
       orFilters.push({ riderChatId: { $in: [chatIdNum, String(rider.chatId)] } });
     }
     if (rider.waJid) {
       orFilters.push({ riderWaJid: rider.waJid });
     }
-    const rideMatch = orFilters.length ? { $or: orFilters } : { _id: null }; // harmless no-match fallback
+    const rideMatch = orFilters.length ? { $or: orFilters } : { _id: null };
 
-    // Parallel work
     const [lastPaid, tripsCompleted, starsAgg] = await Promise.all([
-      // Last payment/ride (either explicitly paid, or completed)
       Ride.findOne({
         ...rideMatch,
         $or: [{ paymentStatus: 'paid' }, { status: 'completed' }]
@@ -184,14 +177,10 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
           createdAt: -1
         })
         .lean(),
-
-      // Trips Completed
       Ride.countDocuments({
         ...rideMatch,
         status: 'completed'
       }),
-
-      // ⭐ Driver → Rider ratings (use riderRating on Ride)
       Ride.aggregate([
         { $match: { ...rideMatch, riderRating: { $gte: 1 } } },
         {
@@ -208,7 +197,7 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       ? {
           rideId: String(lastPaid._id),
           amount: Number(lastPaid.finalAmount ?? lastPaid.estimate ?? 0) || 0,
-          method: lastPaid.paymentMethod || null, // 'cash' | 'payfast'
+          method: lastPaid.paymentMethod || null,
           at:
             lastPaid.paidAt ||
             lastPaid.completedAt ||
@@ -222,11 +211,10 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       ? { avg: Number(starsAgg[0].avg.toFixed(2)), count: starsAgg[0].count }
       : { avg: null, count: 0 };
 
-    // Disable caching so the dashboard always gets fresh data
     res.set('Cache-Control', 'no-store');
 
     return res.json({
-      platform: rider.platform || null,   // 'telegram' | 'whatsapp' | null
+      platform: rider.platform || null,
       chatId: Number.isFinite(chatIdNum) ? chatIdNum : null,
       waJid: rider.waJid || null,
       name: rider.name || '',
@@ -234,15 +222,13 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       credit: rider.credit ?? 0,
       trips: tripsCompleted,
       lastPayment,
-      riderStars // ← ⭐ added
+      riderStars
     });
   } catch (e) {
     console.error('rider-by-token error:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-
 
 /* WhatsApp QR Code helpers */
 app.post('/wa/reset', async (req, res) => {
@@ -279,7 +265,6 @@ app.get('/api/whatsapp/status', (req, res) => {
 });
 
 /* Profile update (dashboard) */
-/* Profile update (dashboard) */
 app.post('/api/update-profile', async (req, res) => {
   const { chatId, name, email, credit } = req.body;
   if (!chatId || isNaN(Number(chatId))) {
@@ -293,7 +278,6 @@ app.post('/api/update-profile', async (req, res) => {
 
   if (name != null) rider.name = name;
   if (email != null) rider.email = email;
-  // Only update credit if provided (dashboard no longer sends it)
   if (credit != null && credit !== '') rider.credit = credit;
 
   await rider.save();
@@ -335,11 +319,9 @@ app.get('/map/:rideId', (req, res) => {
 /* ---------------- Tracking APIs ---------------- */
 
 function isRideLinkExpired(ride) {
-  // terminal states always expire the link
   if (['cancelled', 'completed', 'payment_pending'].includes(ride.status)) {
     return { expired: true, reason: ride.status };
   }
-  // TTL expiry for stale links (optional)
   if (TRACK_LINK_TTL_HOURS > 0) {
     const made = new Date(ride.createdAt || Date.now());
     const expiresAt = new Date(made.getTime() + TRACK_LINK_TTL_HOURS * 3600 * 1000);
@@ -355,13 +337,12 @@ app.get('/api/ride/:rideId', async (req, res) => {
     const ride = await Ride.findById(req.params.rideId).lean();
     if (!ride) return res.status(404).json({ error: 'Ride not found' });
 
-    // Expiry gate: cancel/completed/ttl
     const exp = isRideLinkExpired(ride);
     if (exp.expired) {
       return res.status(410).json({
         error: 'expired',
         status: ride.status,
-        reason: exp.reason,                // 'cancelled' | 'completed' | 'payment_pending' | 'ttl'
+        reason: exp.reason,
         createdAt: ride.createdAt,
         cancelledAt: ride.cancelledAt || null,
         completedAt: ride.completedAt || null,
@@ -369,7 +350,6 @@ app.get('/api/ride/:rideId', async (req, res) => {
       });
     }
 
-    // Provide extra fields the client can use to hold state
     let driverChatId = null;
     if (ride.driverId) {
       const drv = await Driver.findById(ride.driverId).lean();
@@ -418,9 +398,6 @@ function stopDriverTicker(chatId) {
   lastLocByDriver.delete(Number(chatId));
 }
 
-/* ⭐ NEW: in-memory "arrived" dedupe per ride */
-const arrivedAnnounced = new Set(); // Set(rideId)
-
 /* ---------------- utilities ---------------- */
 function toRad(x){ return (x * Math.PI) / 180; }
 function haversineMeters(a, b) {
@@ -454,7 +431,6 @@ async function appendPathPoint(rideId, lat, lng, label = '') {
       console.log(`🧭 PATH ${label} ride=${key} lat=${lat.toFixed(6)} lng=${lng.toFixed(6)}`);
     }
   } catch (e) {
-    // Non-fatal
     console.warn('appendPathPoint failed:', e?.message || e);
   }
 }
@@ -485,15 +461,35 @@ driverEvents.on('driver:location', async ({ chatId, location }) => {
         // ⭐ also append to the ride path (capped)
         appendPathPoint(ride._id, lat, lng);
 
-        // server-side arrival auto-detect
-        if (ride.status === 'accepted' && ride.pickup?.lat && ride.pickup?.lng && !arrivedAnnounced.has(String(ride._id))) {
+        // ---------- DURABLE ARRIVAL DEDUPE ----------
+        if (ride.status === 'accepted' && ride.pickup?.lat && ride.pickup?.lng) {
           const dMeters = haversineMeters({ lat, lng }, ride.pickup);
           if (dMeters <= 35) {
-            arrivedAnnounced.add(String(ride._id));
-            driverEvents.emit('ride:arrived', { driverId: chatId, rideId: String(ride._id) });
-            io.emit(`ride:${ride._id}:arrived`);
+            const now = new Date();
+            const lastEmitTs = ride._lastArriveEmitAt ? new Date(ride._lastArriveEmitAt).getTime() : 0;
+            const COOLDOWN_MS = 20 * 1000; // 20s anti-burst
+            const cooled = now.getTime() - lastEmitTs > COOLDOWN_MS;
+
+            // First time: atomically set arrivedNotified -> true
+            const result = await Ride.updateOne(
+              { _id: ride._id, arrivedNotified: { $ne: true } },
+              { $set: { arrivedNotified: true, arrivedAt: now, _lastArriveEmitAt: now } }
+            );
+
+            if (result.modifiedCount > 0 || (ride.arrivedNotified && cooled)) {
+              try {
+                driverEvents.emit('ride:arrived', { driverId: chatId, rideId: String(ride._id) });
+                io.emit(`ride:${ride._id}:arrived`);
+              } finally {
+                // If already notified previously, at least refresh cooldown
+                if (!(result.modifiedCount > 0)) {
+                  await Ride.updateOne({ _id: ride._id }, { $set: { _lastArriveEmitAt: now } });
+                }
+              }
+            }
           }
         }
+        // -------------------------------------------
       }
     }
 
@@ -604,7 +600,7 @@ driverEvents.on('ride:ignored', async ({ previousDriverId, ride }) => {
   } catch (e) { console.error('ride:ignored handler error:', e?.message || e); }
 });
 
-/* ➕ When the driver accepts, send THEM a driver-mode link that streams HTML5 GPS */
+/* ➕ When the driver accepts, send links */
 driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
   try {
     const ride = await Ride.findById(rideId);
@@ -635,7 +631,7 @@ driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
   }
 });
 
-/* ⭐ CHG: when arrived, also emit a socket event so the map modal can show */
+/* Arrived → notify + socket */
 driverEvents.on('ride:arrived', async ({ rideId }) => {
   try {
     const ride = await Ride.findById(rideId);
@@ -657,15 +653,15 @@ driverEvents.on('ride:arrived', async ({ rideId }) => {
   }
 });
 
-/* ⭐ NEW: picked event (for admin activity feed) */
-driverEvents.on('ride:picked', async ({ rideId, by }) => {
+/* Picked event (admin feed) */
+driverEvents.on('ride:picked', async ({ rideId }) => {
   try {
     await logActivity({
       rideId,
       type: 'picked',
       actorType: 'driver',
       message: 'Rider picked up',
-      meta: { by: by || 'unknown' }
+      meta: { by: 'unknown' }
     });
   } catch (e) {
     console.warn('ride:picked handler failed:', e?.message || e);
@@ -677,7 +673,8 @@ driverEvents.on('ride:started', async ({ rideId, by }) => {
     const ride = await Ride.findById(rideId);
     if (!ride) return;
 
-    arrivedAnnounced.delete(String(rideId));
+    // we no longer use an in-memory set; just clear cooldown stamp if any
+    try { await Ride.updateOne({ _id: rideId }, { $unset: { _lastArriveEmitAt: 1 } }); } catch {}
 
     await logActivity({
       rideId,
@@ -698,7 +695,7 @@ driverEvents.on('ride:started', async ({ rideId, by }) => {
   }
 });
 
-/* ---------------- Start Trip API (driver clicks Start in map UI) ---------------- */
+/* ---------------- Start Trip API ---------------- */
 app.post('/api/ride/:rideId/start', async (req, res) => {
   try {
     const { rideId } = req.params;
@@ -738,7 +735,7 @@ app.post('/api/ride/:rideId/start', async (req, res) => {
   }
 });
 
-/* ---------------- Picked Up API (driver clicks Picked in map UI) ---------------- */
+/* ---------------- Picked Up API ---------------- */
 app.post('/api/ride/:rideId/picked', async (req, res) => {
   try {
     const { rideId } = req.params;
@@ -778,75 +775,7 @@ app.post('/api/ride/:rideId/picked', async (req, res) => {
   }
 });
 
-// /* ---- Minimal fare helpers for finish (same as you had) ---- */
-// const RATE_TABLE = {
-//   normal:  { baseFare: 0, perKm: 7,  minCharge: 30, withinKm: 30 },
-//   comfort: { baseFare: 0, perKm: 8,  minCharge: 30, withinKm: 30 },
-//   luxury:  { baseFare: 0, perKm: 12, minCharge: 45, withinKm: 45 },
-//   xl:      { baseFare: 0, perKm: 10, minCharge: 39, withinKm: 40 }
-// };
-// function haversineKm(a, b){
-//   if (!a || !b || typeof a.lat!=='number' || typeof a.lng!=='number' || typeof b.lat!=='number' || typeof b.lng!=='number') return 0;
-//   const toRad = (x)=> x * Math.PI / 180;
-//   const R = 6371; // km
-//   const dLat = toRad(b.lat - a.lat);
-//   const dLon = toRad(b.lng - a.lng);
-//   const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
-//   return 2 * R * Math.asin(Math.sqrt(s));
-// }
-// function pathLengthKm(path){
-//   if (!Array.isArray(path) || path.length < 2) return 0;
-//   let km = 0;
-//   for (let i = 1; i < path.length; i++){
-//     const p0 = path[i-1], p1 = path[i];
-//     if (!p0 || !p1) continue;
-//     km += haversineKm({lat:p0.lat, lng:p0.lng}, {lat:p1.lat, lng:p1.lng});
-//   }
-//   return km;
-// }
-// function expectedDurationSec(distanceKm, avgKph = 30){
-//   const hours = distanceKm / Math.max(1, avgKph);
-//   return Math.round(hours * 3600);
-// }
-// function priceFromRate(distanceKm, vehicleType='normal'){
-//   const vt = RATE_TABLE[vehicleType] ? vehicleType : 'normal';
-//   const rate = RATE_TABLE[vt];
-//   const d = Math.max(0, Number(distanceKm || 0));
-//   const within = rate.withinKm ?? 0;
-//   const variable = d <= within ? 0 : (rate.perKm ?? 0) * (d - within);
-//   const base = (rate.baseFare ?? 0) + (rate.minCharge ?? 0) + variable;
-//   return Math.round(base);
-// }
-// async function computeFinalFare({
-//   pickup,
-//   destination,
-//   vehicleType = 'normal',
-//   path = null,
-//   createdAt = null,
-//   pickedAt = null,
-//   completedAt = new Date()
-// } = {}) {
-//   let tripKm = 0;
-//   if (Array.isArray(path) && path.length >= 2) tripKm = pathLengthKm(path);
-//   else tripKm = haversineKm(pickup, destination) * 1.25;
-
-//   const startTs = pickedAt ? new Date(pickedAt).getTime() : (createdAt ? new Date(createdAt).getTime() : Date.now());
-//   const endTs   = completedAt ? new Date(completedAt).getTime() : Date.now();
-//   const actualDurationSecVal = Math.max(0, Math.round((endTs - startTs) / 1000));
-//   const expectedSec = expectedDurationSec(tripKm, 30);
-
-//   return {
-//     price: priceFromRate(tripKm, vehicleType),
-//     tripKm: Number(tripKm.toFixed(3)),
-//     actualDurationSec: actualDurationSecVal,
-//     expectedDurationSec: expectedSec,
-//     trafficFactor: Number((expectedSec > 0 ? (actualDurationSecVal / expectedSec) : 1).toFixed(2)),
-//     surge: 1.0
-//   };
-// }
-
-/* ---------------- Cancel Trip API (driver clicks Cancel) ---------------- */
-/* ---------------- Cancel Trip API (driver clicks Cancel) ---------------- */
+/* ---------------- Cancel Trip API ---------------- */
 app.post('/api/ride/:rideId/cancel', async (req, res) => {
   try {
     const { rideId } = req.params;
@@ -854,7 +783,6 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
     const ride = await Ride.findById(rideId);
     if (!ride) return res.status(404).json({ error: 'Ride not found' });
 
-    // last known driver location (if any)
     let cancelLat = null, cancelLng = null;
     if (ride.driverId) {
       const drv = await Driver.findById(ride.driverId).lean();
@@ -865,7 +793,6 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       }
     }
 
-    // stamp cancellation
     if (ride.status !== 'cancelled') {
       ride.status = 'cancelled';
       try {
@@ -875,9 +802,7 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       ride.cancelledAt = new Date();
       ride.cancelledBy = 'driver';
 
-      // ⭐ compute & store cancel distance from pickup
       if (cancelLat != null && cancelLng != null && ride.pickup?.lat && ride.pickup?.lng) {
-        // reuse your haversineMeters helper that's already in this file
         const meters = haversineMeters(
           { lat: ride.pickup.lat, lng: ride.pickup.lng },
           { lat: cancelLat,      lng: cancelLng }
@@ -889,7 +814,6 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       await ride.save();
     }
 
-    // logs
     if (cancelLat != null && cancelLng != null) {
       console.log(
         `❌ CANCELLED ride=${rideId} reason="${reason || ''}" lat=${cancelLat.toFixed(6)} lng=${cancelLng.toFixed(6)}` +
@@ -899,7 +823,6 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
       console.log(`❌ CANCELLED ride=${rideId} reason="${reason || ''}" (no last driver coords)`);
     }
 
-    // notify rider (optional)
     const riderChatId = ride.riderChatId || ride.riderTelegramChatId || ride.rider?.chatId || null;
     if (riderChatId && riderBot) {
       const cleanReason = String(reason || 'Trip cancelled').trim();
@@ -938,14 +861,6 @@ app.post('/api/ride/:rideId/cancel', async (req, res) => {
   }
 });
 
-
-/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
-/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
-/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
-/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
-/* ---------------- Finish Trip API (driver clicks Finish) ---------------- */
-
-
 /* ---------------- Socket.IO ---------------- */
 io.on('connection', (sock) => {
   console.log('🔌 Socket connected:', sock.id);
@@ -982,4 +897,50 @@ io.on('connection', (sock) => {
 /* ---------------- Start server ---------------- */
 server.listen(PORT, () => {
   console.log(`🚀 Server is running at http://localhost:${PORT}`);
+});
+
+/* ---------------- Graceful shutdown ---------------- */
+async function gracefulExit(signal = 'SIGINT') {
+  try {
+    console.log(`\n🧹 Shutting down (${signal})...`);
+
+    // Stop accepting new connections
+    await new Promise((resolve) => server.close(resolve));
+
+    // Stop Socket.IO
+    try { await new Promise((resolve) => io.close(resolve)); } catch {}
+
+    // Stop Telegram polling (if running)
+    try { await riderBot?.stopPolling?.(); } catch {}
+    try { await driverBot?.stopPolling?.(); } catch {}
+
+    // Clear per-driver tickers (avoid orphaned intervals)
+    try {
+      for (const id of tickerByDriver.values()) clearInterval(id);
+      tickerByDriver.clear();
+      lastLocByDriver.clear();
+    } catch {}
+
+    // Optional: remove event listeners
+    try {
+      driverEvents.removeAllListeners();
+      riderEvents.removeAllListeners();
+    } catch {}
+
+    // Close Mongo
+    try { await mongoose.connection.close(); } catch {}
+
+    console.log('✅ Clean shutdown complete. Bye!');
+    process.exit(0);
+  } catch (err) {
+    console.error('⚠️ Error during shutdown:', err?.message || err);
+    process.exit(1);
+  }
+}
+
+process.on('SIGINT',  () => gracefulExit('SIGINT'));   // Ctrl+C / Git Bash / Windows console
+process.on('SIGTERM', () => gracefulExit('SIGTERM'));  // Cloud providers
+process.once('SIGUSR2', async () => {                  // nodemon hot-restart
+  await gracefulExit('SIGUSR2');
+  process.kill(process.pid, 'SIGUSR2');
 });

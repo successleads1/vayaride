@@ -29,7 +29,6 @@ const RideSchema = new mongoose.Schema(
     vehicleType: { type: String },
 
     // Payment
-    // 👇 extend enum to allow 'app' / 'paypal' (card-like)
     paymentMethod: { type: String, enum: ['cash', 'payfast', 'app', 'paypal'], default: 'cash' },
 
     // Payment tracking
@@ -50,7 +49,7 @@ const RideSchema = new mongoose.Schema(
     cancelledAt: { type: Date },
     cancelledBy: { type: String, enum: ['driver', 'rider', 'system'], default: undefined },
 
-    // ⭐ NEW: capture where & how far when cancelled
+    // NEW: capture where & how far when cancelled
     cancelDriverLoc: { lat: Number, lng: Number }, // last driver coords when cancelled
     cancelDistanceKm: { type: Number },            // distance from pickup to cancel point (km, ~2 decimals)
 
@@ -73,13 +72,18 @@ const RideSchema = new mongoose.Schema(
     // Source platform (for notifications)
     platform: { type: String, enum: ['telegram', 'whatsapp', null], default: null },
 
-    // ⭐⭐⭐ RATINGS
+    // RATINGS
     // rider → driver
     driverRating: { type: Number, min: 1, max: 5, default: null },
     driverRatedAt: { type: Date, default: null },
     // driver → rider
     riderRating: { type: Number, min: 1, max: 5, default: null },
-    riderRatedAt: { type: Date, default: null }
+    riderRatedAt: { type: Date, default: null },
+
+    // ⭐ Arrival dedupe (durable, survives restarts)
+    arrivedNotified: { type: Boolean, default: false }, // one-shot flag
+    arrivedAt: { type: Date, default: null },           // when first marked arrived
+    _lastArriveEmitAt: { type: Date, default: null }    // small cooldown to avoid bursts
   },
   { timestamps: true }
 );
