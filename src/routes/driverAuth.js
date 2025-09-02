@@ -39,6 +39,10 @@ const ensureGuest = (req, res, next) => {
   return next();
 };
 
+const getPublicUrl = (req) =>
+  (process.env.PUBLIC_URL && process.env.PUBLIC_URL.replace(/\/$/, '')) ||
+  `${req.protocol}://${req.get('host')}`;
+
 function uploadBufferToCloudinary(buffer, folder, filenameHint) {
   return new Promise((resolve, reject) => {
     const passthrough = new stream.PassThrough();
@@ -88,7 +92,11 @@ const router = express.Router();
 
 /* ---------------- Register ---------------- */
 router.get('/register', ensureGuest, (req, res) => {
-  res.render('driver/register', { err: req.query.err || null });
+  res.render('driver/register', {
+    error: req.query.err || null,     // normalize to "error" for the EJS
+    publicUrl: getPublicUrl(req),
+    form: {}                          // optional initial form state
+  });
 });
 
 router.post('/register', ensureGuest, async (req, res) => {
@@ -100,34 +108,43 @@ router.post('/register', ensureGuest, async (req, res) => {
     const confirm  = String(req.body.confirm || '');
     const vehicleTypeRaw = String(req.body.vehicleType || '').toLowerCase();
 
-    console.log('📝 Driver register attempt:', {
-      namePresent: !!nameRaw,
-      email: emailRaw,
-      vehicleType: vehicleTypeRaw
-    });
+    const publicUrl = getPublicUrl(req);
+    const keep = { name: nameRaw, email: emailRaw, vehicleType: vehicleTypeRaw };
 
     // basic validation
     if (!nameRaw || !emailRaw || !password || !confirm || !vehicleTypeRaw) {
-      console.log('⚠️ Register validation failed: missing fields');
-      return res.status(200).render('driver/register', { err: 'Missing fields' });
+      return res.status(200).render('driver/register', {
+        error: 'Missing fields',
+        publicUrl,
+        form: keep
+      });
     }
     if (password !== confirm) {
-      console.log('⚠️ Register validation failed: passwords do not match');
-      return res.status(200).render('driver/register', { err: 'Passwords do not match' });
+      return res.status(200).render('driver/register', {
+        error: 'Passwords do not match',
+        publicUrl,
+        form: keep
+      });
     }
 
     // allowlisted vehicle types
     const allowedVehicles = ['normal', 'comfort', 'luxury', 'xl'];
     if (!allowedVehicles.includes(vehicleTypeRaw)) {
-      console.log('⚠️ Register validation failed: invalid vehicle type:', vehicleTypeRaw);
-      return res.status(200).render('driver/register', { err: 'Invalid vehicle type' });
+      return res.status(200).render('driver/register', {
+        error: 'Invalid vehicle type',
+        publicUrl,
+        form: keep
+      });
     }
 
     // unique email
     const existing = await Driver.findOne({ email: emailRaw });
     if (existing) {
-      console.log('⚠️ Register validation failed: email already in use:', emailRaw);
-      return res.status(200).render('driver/register', { err: 'Email already in use' });
+      return res.status(200).render('driver/register', {
+        error: 'Email already in use',
+        publicUrl,
+        form: keep
+      });
     }
 
     // hash + create
@@ -141,34 +158,34 @@ router.post('/register', ensureGuest, async (req, res) => {
       isAvailable: false
     });
 
-    console.log('✅ Driver created:', { id: String(created._id), email: emailRaw });
-
-    // env sanity for mailer (do not print secrets!)
-    console.log('✉️ Mailer env check:', {
-      EMAIL_USER_present: !!process.env.EMAIL_USER,
-      EMAIL_PASS_present: !!process.env.EMAIL_PASS
-    });
-
     // send welcome email (non-fatal if it fails)
     try {
-      console.log('✉️ Sending welcome email to', emailRaw);
       await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw });
-      console.log('✅ Welcome email queued/sent to', emailRaw);
     } catch (e) {
-      console.error('❌ Welcome email failed:', e?.message || e, e?.stack ? '\n' + e.stack : '');
+      console.error('Welcome email failed:', e?.message || e);
     }
 
     // redirect to login with email prefilled
     return res.redirect(`/driver/login?email=${encodeURIComponent(emailRaw)}`);
   } catch (err) {
-    console.error('❌ Register error:', err?.message || err, err?.stack ? '\n' + err.stack : '');
-    return res.status(500).render('driver/register', { err: 'Server error' });
+    console.error('Register error:', err?.message || err);
+    return res.status(500).render('driver/register', {
+      error: 'Server error',
+      publicUrl: getPublicUrl(req),
+      form: {
+        name: (req.body?.name || '').trim(),
+        email: (req.body?.email || '').trim().toLowerCase()
+      }
+    });
   }
 });
 
 /* ---------------- Login ---------------- */
 router.get('/login', ensureGuest, (req, res) => {
-  res.render('driver/login', { email: req.query.email || '' });
+  res.render('driver/login', {
+    email: req.query.email || '',
+    publicUrl: getPublicUrl(req)   // not strictly needed, but harmless
+  });
 });
 
 router.post(
@@ -222,7 +239,7 @@ router.post('/upload-docs', ensureAuth, upload.fields(DOC_FIELDS), async (req, r
     if (err && err.code === 'LIMIT_FILE_SIZE') {
       return res.redirect('/driver?err=File%20too%20large%20(max%2010MB)#docs');
     }
-    console.error('❌ Upload docs error:', err);
+    console.error('Upload docs error:', err);
     const msg = err?.message ? encodeURIComponent(err.message) : 'Upload%20failed';
     return res.redirect('/driver?err=' + msg + '#docs');
   }
@@ -291,7 +308,7 @@ router.post('/delete-doc', ensureAuth, async (req, res) => {
 
     return res.redirect('/driver?ok=' + encodeURIComponent(`${key} deleted`) + '#docs');
   } catch (err) {
-    console.error('❌ Delete doc error:', err);
+    console.error('Delete doc error:', err);
     return res.redirect('/driver?err=Failed%20to%20delete%20document#docs');
   }
 });
@@ -307,7 +324,7 @@ router.post('/vehicle', ensureAuth, async (req, res) => {
     await Driver.findByIdAndUpdate(req.user._id, { vehicleType });
     return res.redirect('/driver?ok=Vehicle%20updated');
   } catch (err) {
-    console.error('❌ Vehicle update error:', err);
+    console.error('Vehicle update error:', err);
     return res.redirect('/driver?err=Server%20error');
   }
 });
