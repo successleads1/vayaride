@@ -4,9 +4,15 @@ import express from 'express';
 const router = express.Router();
 
 /**
- * Local “landing” for upgrades.
- * - Can simulate a success (posts to /api/payfast/notify)
- * - Or redirect to your real Next.js gateway to PayFast
+ * GET /api/partner/upgrade/payfast
+ * Simple landing page:
+ *  - ✅ Simulate success → POST /api/payfast/notify
+ *  - 💳 Pay with PayFast → GET /api/payfast/gateway (builds signed form → PayFast)
+ *
+ * Base rules:
+ *   - notify_url uses PUBLIC_URL (or inferred) so PayFast can reach your server
+ *   - gateway is served by THIS Express app (PUBLIC_URL or inferred)
+ *   - You can still point the landing page itself via NEXT_GATEWAY_URL from /pay/:rideId
  */
 router.get('/upgrade/payfast', (req, res) => {
   const {
@@ -19,20 +25,13 @@ router.get('/upgrade/payfast', (req, res) => {
     contactName = '',
   } = req.query;
 
-  // Local notify (for simulated success)
-  const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  const inferred = `${req.protocol}://${req.get('host')}`.replace(/\/+$/, '');
+  const base = (process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
+
   const notifyUrl = `${base}/api/payfast/notify`;
+  const gatewayUrl = new URL(`${base}/api/payfast/gateway`);
 
-  // Telegram deep link (optional)
-  const tgUser = process.env.TELEGRAM_RIDER_BOT_USERNAME || '';
-
-  // ✅ REAL redirect endpoint you asked to hardcode
-  // We’ll build a full URL on the client by appending the same query params
-  const payfastRedirectUrl = new URL('https://vayaridee.onrender.com/api/partner/upgrade/payfast');
-
-  res
-    .set('Content-Type', 'text/html')
-    .send(`<!doctype html>
+  res.set('Content-Type', 'text/html').send(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
@@ -50,10 +49,9 @@ router.get('/upgrade/payfast', (req, res) => {
     button.secondary{background:#e0e0e6;color:#222}
     button.payfast{background:var(--pri)}
     button:disabled{opacity:.6;cursor:not-allowed}
-    .ok{color:var(--ok)}
-    .err{color:var(--err)}
+    .ok{color:var(--ok)} .err{color:var(--err)}
     .debug{margin-top:14px;padding:10px;background:#f2f2f5;border-radius:8px;font-size:12px;color:#333;word-break:break-all}
-    .grid{display:grid;grid-template-columns: 1fr 1fr; gap: 16px}
+    .grid{display:grid;grid-template-columns:1fr 1fr; gap: 16px}
     @media (max-width: 560px){ .grid{grid-template-columns:1fr} }
   </style>
 </head>
@@ -69,20 +67,19 @@ router.get('/upgrade/payfast', (req, res) => {
       <div class="row"><b>Contact:</b> ${contactName || '-'}</div>
     </div>
 
-    <p class="muted">Choose either the real PayFast flow or simulate a success locally for development.</p>
+    <p class="muted">Choose either the real PayFast flow or simulate success locally.</p>
 
     <div class="actions">
       <button id="btn-payfast" class="payfast">💳 Pay with PayFast (Real)</button>
       <button id="btn-ok">✅ Simulate PayFast SUCCESS</button>
-      <button id="btn-cancel" class="secondary">❌ Cancel (no notify)</button>
+      <button id="btn-cancel" class="secondary">❌ Cancel</button>
     </div>
 
     <div id="msg" class="muted"></div>
 
     <div class="debug">
-      <div><b>Local Notify URL (mock):</b> ${notifyUrl}</div>
-      <div><b>Real Redirect Builder:</b> ${payfastRedirectUrl.toString()}</div>
-      <div><b>Telegram bot:</b> ${tgUser || '—'}</div>
+      <div><b>Local Notify URL:</b> ${notifyUrl}</div>
+      <div><b>Gateway Redirect:</b> ${gatewayUrl.toString()}</div>
     </div>
   </div>
 
@@ -94,7 +91,6 @@ router.get('/upgrade/payfast', (req, res) => {
 
     const m_payment_id = ${JSON.stringify(m_payment_id || partnerId || '')};
     const notifyUrl    = ${JSON.stringify(notifyUrl)};
-    const tgUser       = ${JSON.stringify(tgUser)};
     const email        = ${JSON.stringify(email || '')};
     const partnerId    = ${JSON.stringify(partnerId || '')};
     const plan         = ${JSON.stringify(plan || 'basic')};
@@ -102,43 +98,22 @@ router.get('/upgrade/payfast', (req, res) => {
     const companyName  = ${JSON.stringify(companyName || '')};
     const contactName  = ${JSON.stringify(contactName || '')};
 
-    // Hardcoded real redirect base you asked for
-    const payfastRedirectUrl = new URL(${JSON.stringify(payfastRedirectUrl.toString())});
+    const gatewayBase = ${JSON.stringify(gatewayUrl.toString())};
 
-    // Append same params you used to open this page
-    function buildRealRedirectUrl() {
-      const u = new URL(payfastRedirectUrl);
+    function buildGatewayUrl() {
+      const u = new URL(gatewayBase);
       if (partnerId)   u.searchParams.set('partnerId', partnerId);
       if (plan)        u.searchParams.set('plan', plan);
       if (amount)      u.searchParams.set('amount', amount);
       if (email)       u.searchParams.set('email', email);
       if (companyName) u.searchParams.set('companyName', companyName);
       if (contactName) u.searchParams.set('contactName', contactName);
-      // Optionally forward m_payment_id (your Next route may ignore it)
       if (m_payment_id) u.searchParams.set('m_payment_id', m_payment_id);
       return u.toString();
     }
 
-    function goBackToTelegram() {
-      if (!tgUser) return;
-      try { window.location.href = 'tg://resolve?domain=' + tgUser; } catch(e) {}
-      setTimeout(() => { try { window.location.href = 'https://t.me/' + tgUser; } catch(e) {} }, 600);
-      setTimeout(() => { try { window.close(); } catch(e) {} }, 1200);
-    }
+    btnPayfast.onclick = () => { window.location.href = buildGatewayUrl(); };
 
-    // 👉 REAL PayFast flow
-    btnPayfast.onclick = () => {
-      try {
-        const url = buildRealRedirectUrl();
-        console.log('[PayFast redirect]', url);
-        window.location.href = url;
-      } catch (e) {
-        console.error(e);
-        msg.innerHTML = '<span class="err">❌ Failed to build redirect URL</span>';
-      }
-    };
-
-    // 👉 LOCAL SIMULATE SUCCESS
     btnOk.onclick = async () => {
       btnOk.disabled = true;
       msg.textContent = 'Notifying server…';
@@ -146,26 +121,18 @@ router.get('/upgrade/payfast', (req, res) => {
         const body = new URLSearchParams({
           m_payment_id: m_payment_id || partnerId || '',
           payment_status: 'COMPLETE',
-          email_address: email   // echo email back to IPN (like real PayFast payload)
+          email_address: email
         });
-        const r = await fetch(notifyUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body
-        });
-        if (!r.ok) throw new Error('Notify failed with status ' + r.status);
-        msg.innerHTML = '<span class="ok">✅ Payment complete. You can return to Telegram.</span>';
-        setTimeout(goBackToTelegram, 800);
+        const r = await fetch(notifyUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+        if (!r.ok) throw new Error('Notify failed');
+        msg.innerHTML = '<span class="ok">✅ Payment complete.</span>';
       } catch (e) {
-        msg.innerHTML = '<span class="err">❌ ' + (e && e.message ? e.message : 'Failed to notify') + '</span>';
+        msg.innerHTML = '<span class="err">❌ Failed: ' + e.message + '</span>';
         btnOk.disabled = false;
       }
     };
 
-    btnCancel.onclick = () => {
-      msg.textContent = 'Cancelled. This page will close.';
-      setTimeout(() => { try { window.close(); } catch(e) {} }, 500);
-    };
+    btnCancel.onclick = () => { msg.textContent = 'Cancelled.'; };
   </script>
 </body>
 </html>`);
