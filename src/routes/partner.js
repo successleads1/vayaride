@@ -7,15 +7,11 @@ const router = express.Router();
  * Local “landing” for upgrades.
  * Lets you:
  *  - Simulate a success (posts to /api/payfast/notify)
- *  - Or redirect to your real Next.js gateway to PayFast
+ *  - Or redirect to your real PayFast redirect route (/pay/:id)
  *
- * Real redirect base is now taken from env/local, NOT hard-coded:
- *   - process.env.NEXT_GATEWAY_URL  (preferred)
- *   - process.env.PUBLIC_URL        (fallback, e.g., ngrok)
+ * Real redirect base is taken from env/local, NOT hard-coded:
+ *   - process.env.PUBLIC_URL        (preferred)
  *   - inferred http(s)://host       (last resort)
- *
- * If you want a hard default, set PUBLIC_URL in .env to:
- *   https://7945a61c140e.ngrok-free.app
  */
 router.get('/upgrade/payfast', (req, res) => {
   const {
@@ -35,10 +31,6 @@ router.get('/upgrade/payfast', (req, res) => {
 
   // Telegram deep link (optional)
   const tgUser = process.env.TELEGRAM_RIDER_BOT_USERNAME || '';
-
-  // ✅ REAL redirect endpoint — now built from env/local (no hard-coded domain)
-  const gatewayBase = (process.env.NEXT_GATEWAY_URL || process.env.PUBLIC_URL || inferred).replace(/\/+$/, '');
-  const payfastRedirectUrl = new URL(`${gatewayBase}/api/partner/upgrade/payfast`);
 
   res
     .set('Content-Type', 'text/html')
@@ -91,7 +83,7 @@ router.get('/upgrade/payfast', (req, res) => {
 
     <div class="debug">
       <div><b>Local Notify URL (mock):</b> ${notifyUrl}</div>
-      <div><b>Real Redirect Builder:</b> ${payfastRedirectUrl.toString()}</div>
+      <div><b>Real Redirect Builder:</b> /pay/:id</div>
       <div><b>Telegram bot:</b> ${tgUser || '—'}</div>
     </div>
   </div>
@@ -106,26 +98,11 @@ router.get('/upgrade/payfast', (req, res) => {
     const notifyUrl    = ${JSON.stringify(notifyUrl)};
     const tgUser       = ${JSON.stringify(tgUser)};
     const email        = ${JSON.stringify(email || '')};
-    const partnerId    = ${JSON.stringify(partnerId || '')};
-    const plan         = ${JSON.stringify(plan || 'basic')};
-    const amount       = ${JSON.stringify(amount || '0.00')};
-    const companyName  = ${JSON.stringify(companyName || '')};
-    const contactName  = ${JSON.stringify(contactName || '')};
 
-    // Real redirect base built on server (env/local)
-    const payfastRedirectUrl = new URL(${JSON.stringify(payfastRedirectUrl.toString())});
-
-    // Append same params you used to open this page
+    // 👉 REAL PayFast flow: call /pay/:id which does the redirect server-side
     function buildRealRedirectUrl() {
-      const u = new URL(payfastRedirectUrl);
-      if (partnerId)   u.searchParams.set('partnerId', partnerId);
-      if (plan)        u.searchParams.set('plan', plan);
-      if (amount)      u.searchParams.set('amount', amount);
-      if (email)       u.searchParams.set('email', email);
-      if (companyName) u.searchParams.set('companyName', companyName);
-      if (contactName) u.searchParams.set('contactName', contactName);
-      if (m_payment_id) u.searchParams.set('m_payment_id', m_payment_id);
-      return u.toString();
+      if (!m_payment_id) throw new Error('missing ride/payment id');
+      return \`${base}/pay/\${encodeURIComponent(m_payment_id)}\`;
     }
 
     function goBackToTelegram() {
@@ -135,7 +112,6 @@ router.get('/upgrade/payfast', (req, res) => {
       setTimeout(() => { try { window.close(); } catch(e) {} }, 1200);
     }
 
-    // 👉 REAL PayFast flow
     btnPayfast.onclick = () => {
       try {
         const url = buildRealRedirectUrl();
@@ -147,13 +123,12 @@ router.get('/upgrade/payfast', (req, res) => {
       }
     };
 
-    // 👉 LOCAL SIMULATE SUCCESS
     btnOk.onclick = async () => {
       btnOk.disabled = true;
       msg.textContent = 'Notifying server…';
       try {
         const body = new URLSearchParams({
-          m_payment_id: m_payment_id || partnerId || '',
+          m_payment_id: m_payment_id || '',
           payment_status: 'COMPLETE',
           email_address: email
         });
