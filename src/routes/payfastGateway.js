@@ -12,37 +12,34 @@ function toTwoDecimals(v) {
 
 /** Build signature from the SAME ordered list the form will submit */
 function generateSignatureFromPairs(pairs, passPhrase = '') {
-  // Only include non-empty values and preserve order
   const filtered = pairs.filter(([, val]) => {
     const s = val == null ? '' : String(val).trim();
     return s !== '';
   });
 
-  const paramString = filtered.map(([k, v]) => {
-    const ek = encodeURIComponent(k).replace(/%20/g, '+');
-    const ev = encodeURIComponent(String(v).trim()).replace(/%20/g, '+');
-    return `${ek}=${ev}`;
-  }).join('&');
+  const paramString = filtered
+    .map(([k, v]) => {
+      const ek = encodeURIComponent(k).replace(/%20/g, '+');
+      const ev = encodeURIComponent(String(v).trim()).replace(/%20/g, '+');
+      return `${ek}=${ev}`;
+    })
+    .join('&');
 
-  const input = passPhrase && passPhrase.trim()
-    ? `${paramString}&passphrase=${encodeURIComponent(passPhrase.trim()).replace(/%20/g, '+')}`
-    : paramString;
+  const input =
+    passPhrase && passPhrase.trim()
+      ? `${paramString}&passphrase=${encodeURIComponent(passPhrase.trim()).replace(/%20/g, '+')}`
+      : paramString;
 
-  // console.log('🔐 PayFast signature input:', input); // helpful for debugging
   return crypto.createHash('md5').update(input).digest('hex');
 }
 
 /**
  * GET /api/payfast/gateway
- * Required query params: partnerId (string/ObjectId), plan, amount, email
- * Optional: companyName, contactName, m_payment_id (override)
- *
- * This builds a signed hidden form and auto-submits to PayFast.
- * IMPORTANT: We DO NOT use custom_int1 anymore (it must be numeric).
- * Instead:
- *   custom_str1 = plan
- *   custom_str2 = our internal paymentId
- *   custom_str3 = partnerId (Mongo ObjectId as string)
+ * Required: partnerId, plan, amount, email
+ * We DO NOT use custom_int1 (must be numeric on PayFast).
+ * custom_str1 = plan
+ * custom_str2 = internal paymentId
+ * custom_str3 = partnerId (Mongo ObjectId/string)
  */
 router.get('/gateway', (req, res) => {
   try {
@@ -57,17 +54,24 @@ router.get('/gateway', (req, res) => {
     } = req.query;
 
     if (!partnerId || !plan || !amount || !email) {
-      return res.status(400).json({ error: 'Missing parameters (partnerId, plan, amount, email required)' });
+      return res
+        .status(400)
+        .json({ error: 'Missing parameters (partnerId, plan, amount, email required)' });
     }
 
-    const PAYFAST_MERCHANT_ID  = process.env.PAYFAST_MERCHANT_ID || '';
+    const PAYFAST_MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID || '';
     const PAYFAST_MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY || '';
-    const PAYFAST_PASSPHRASE   = process.env.PAYFAST_PASSPHRASE || '';
-    const PAYFAST_URL          = process.env.PAYFAST_URL || 'https://payment.payfast.io/eng/process';
+    const PAYFAST_PASSPHRASE = process.env.PAYFAST_PASSPHRASE || '';
+    const PAYFAST_URL = process.env.PAYFAST_URL || 'https://payment.payfast.io/eng/process';
 
-    const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
-    const return_url = `${base}/partner/upgrade/success`;
-    const cancel_url = `${base}/partner/upgrade/cancel`;
+    const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(
+      /\/+$/,
+      '',
+    );
+
+    // 🔁 IMPORTANT: these now point to /api/partner/..., which you already mount.
+    const return_url = `${base}/api/partner/upgrade/success`;
+    const cancel_url = `${base}/api/partner/upgrade/cancel`;
     const notify_url = `${base}/api/payfast/notify`;
 
     const paymentId = m_payment_id || `upgrade_${partnerId}_${Date.now()}`;
@@ -76,27 +80,33 @@ router.get('/gateway', (req, res) => {
 
     // Ordered list used BOTH for signature + form fields
     const fieldPairs = [
-      ['merchant_id',   PAYFAST_MERCHANT_ID],
-      ['merchant_key',  PAYFAST_MERCHANT_KEY],
-      ['return_url',    `${return_url}?payment=${paymentId}&plan=${plan}`],
-      ['cancel_url',    `${cancel_url}?payment=${paymentId}`],
-      ['notify_url',    notify_url],
-      ['name_first',    contactName],
-      ['name_last',     companyName],        // purely cosmetic; keep stable
+      ['merchant_id', PAYFAST_MERCHANT_ID],
+      ['merchant_key', PAYFAST_MERCHANT_KEY],
+      ['return_url', `${return_url}?payment=${paymentId}&plan=${plan}`],
+      ['cancel_url', `${cancel_url}?payment=${paymentId}&plan=${plan}`],
+      ['notify_url', notify_url],
+      ['name_first', contactName],
+      ['name_last', companyName],
       ['email_address', email],
-      ['m_payment_id',  paymentId],
-      ['amount',        amt],
-      ['item_name',     itemName],
+      ['m_payment_id', paymentId],
+      ['amount', amt],
+      ['item_name', itemName],
       ['item_description', `Upgrade to ${plan}`],
-
-      // ⚠️ DO NOT USE custom_int1 (PayFast expects numeric only)
-      ['custom_str1',   String(plan)],       // plan
-      ['custom_str2',   paymentId],          // internal payment id
-      ['custom_str3',   String(partnerId)],  // Mongo ObjectId (string)
+      // no custom_int1
+      ['custom_str1', String(plan)], // plan
+      ['custom_str2', paymentId],    // internal payment id
+      ['custom_str3', String(partnerId)], // partnerId (ObjectId/string)
     ];
 
-    // Sanity: minimal field presence
-    for (const k of ['merchant_id','merchant_key','return_url','cancel_url','notify_url','amount','item_name']) {
+    for (const k of [
+      'merchant_id',
+      'merchant_key',
+      'return_url',
+      'cancel_url',
+      'notify_url',
+      'amount',
+      'item_name',
+    ]) {
       const found = fieldPairs.find(([fk]) => fk === k)?.[1];
       if (!found) return res.status(500).json({ error: `Missing PayFast field: ${k}` });
     }
@@ -111,7 +121,7 @@ router.get('/gateway', (req, res) => {
   <form id="pf" action="${PAYFAST_URL}" method="post">
     ${fieldPairs
       .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
-      .map(([k,v]) => `<input type="hidden" name="${k}" value="${String(v)}">`)
+      .map(([k, v]) => `<input type="hidden" name="${k}" value="${String(v)}">`)
       .join('\n')}
     <input type="hidden" name="signature" value="${signature}">
   </form>
