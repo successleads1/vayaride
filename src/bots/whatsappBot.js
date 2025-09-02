@@ -1,4 +1,5 @@
-// ✅ Correct ESM imports for Baileys
+// src/bots/whatsappBot.js
+// ✅ ESM imports for Baileys
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -16,10 +17,6 @@ import EventEmitter from 'events';
 import axios from 'axios';
 import crypto from 'crypto';
 
-// optional: control terminal QR with env var
-const SHOW_QR = process.env.WA_SHOW_QR === '1';
-
-
 import Ride from '../models/Ride.js';
 import Rider from '../models/Rider.js';
 import Driver from '../models/Driver.js';
@@ -30,27 +27,32 @@ import { getAvailableVehicleQuotes } from '../services/pricing.js';
 /* --------------- paths / env --------------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const ROOT_DIR = path.resolve(process.cwd());
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
 const AUTH_DIR = process.env.WA_AUTH_DIR
   ? path.resolve(process.env.WA_AUTH_DIR)
-  : path.resolve(ROOT_DIR, 'baileys_auth_info'); // fallback for local
+  : path.resolve(ROOT_DIR, 'baileys_auth_info');
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const PUBLIC_URL = process.env.PUBLIC_URL || '';
 
+/* ---------- ZA-only parameters ---------- */
+const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || 'country:za';
+const GMAPS_LANGUAGE = process.env.GOOGLE_MAPS_LANGUAGE || 'en-ZA';
+const GMAPS_REGION = process.env.GOOGLE_MAPS_REGION || 'za';
+const ZA_CENTER = { lat: -28.4793, lng: 24.6727 };
+const ZA_RADIUS_M = 1_500_000;
+
 /* --------------- state --------------- */
 let sock = null;
 let initializing = false;
 let currentQR = null;
-let connState = 'disconnected'; // 'disconnected' | 'connecting' | 'connected'
+let connState = 'disconnected';
 
-// simple name memory and per-ride cache
 const waNames = new Map(); // jid -> name
 const waRideById = new Map();
 
@@ -62,25 +64,9 @@ const convo = new Map();
 // rating-await map (jid -> rideId)
 const ratingAwait = new Map();
 
-/**
- * booking stages:
- * - idle
- * - await_pickup
- * - await_destination
- * - await_vehicle
- * - await_payment
- */
-
-const VEHICLE_LABEL = (vt) =>
-  vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
-
-// QR broadcast for /qrcode
-const waEvents = new EventEmitter();
-
-/* --------------- logger --------------- */
+/* --------------- helpers --------------- */
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
 
-/* --------------- helpers --------------- */
 function purgeAuthFolder() {
   try {
     if (!fs.existsSync(AUTH_DIR)) return;
@@ -103,13 +89,10 @@ async function saveQrPng(dataUrl) {
   }
 }
 
-/* ---------- DEDUPE LAYER (prevents double-sends) ---------- */
+/* ---------- DEDUPE LAYER ---------- */
 const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
-const _recentSends = new Map(); // key `${jid}|${normText}` -> timestamp
-
-function _normalizeText(t = '') {
-  return String(t).trim().replace(/\s+/g, ' ');
-}
+const _recentSends = new Map();
+function _normalizeText(t = '') { return String(t).trim().replace(/\s+/g, ' '); }
 function _shouldSendOnce(jid, text) {
   const key = `${jid}|${_normalizeText(text)}`;
   const now = Date.now();
@@ -129,26 +112,38 @@ async function sendText(jid, text) {
   await sock.sendMessage(jid, { text });
 }
 
-/* ---------- small utils ---------- */
-function generatePIN() {
-  return Math.floor(1000 + Math.random() * 9000).toString();
+function generatePIN() { return Math.floor(1000 + Math.random() * 9000).toString(); }
+function generateToken() { return crypto.randomBytes(24).toString('hex'); }
+const EMAIL_RE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+
+/* ---------- Shortcut expansions ---------- */
+const ZA_SHORTCUTS = {
+  uct: 'University of Cape Town',
+  uwc: 'University of the Western Cape',
+  cput: 'Cape Peninsula University of Technology',
+  wits: 'University of the Witwatersrand',
+  uj: 'University of Johannesburg',
+  up: 'University of Pretoria',
+  ukzn: 'University of KwaZulu-Natal',
+  nwu: 'North-West University',
+  unisa: 'University of South Africa',
+  stellenbosch: 'Stellenbosch University',
+  ru: 'Rhodes University'
+};
+function expandShortcut(raw = '') {
+  const key = String(raw).trim().toLowerCase();
+  return ZA_SHORTCUTS[key] || raw;
 }
-function generateToken() {
-  return crypto.randomBytes(24).toString('hex');
+function boostToZA(raw = '') {
+  const q = String(raw).trim();
+  if (q.length <= 5) return `${q} South Africa`;
+  return q;
 }
-const EMAIL_RE =
-  /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
 
 /* ---------- flow helpers ---------- */
-function resetFlow(jid) {
-  convo.set(jid, { stage: 'idle' });
-}
-function startBooking(jid) {
-  convo.set(jid, { stage: 'await_pickup' });
-}
-function startRegistration(jid) {
-  convo.set(jid, { stage: 'reg_name', temp: {} });
-}
+function resetFlow(jid) { convo.set(jid, { stage: 'idle' }); }
+function startBooking(jid) { convo.set(jid, { stage: 'await_pickup' }); }
+function startRegistration(jid) { convo.set(jid, { stage: 'reg_name', temp: {} }); }
 
 function sendMainMenu(jid) {
   return sendText(
@@ -178,29 +173,19 @@ async function upsertWaRider(jid, { name = null, lastLocation = null } = {}) {
 async function sendDashboardLinkWA(jid) {
   const dashboardToken = generateToken();
   const dashboardPin = generatePIN();
-  const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
+  const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
   await Rider.findOneAndUpdate(
     { waJid: jid },
-    {
-      $set: {
-        dashboardToken,
-        dashboardPin,
-        dashboardTokenExpiry: expiry,
-        platform: 'whatsapp'
-      }
-    },
+    { $set: { dashboardToken, dashboardPin, dashboardTokenExpiry: expiry, platform: 'whatsapp' } },
     { upsert: true }
   );
 
   const link = `${PUBLIC_URL}/rider-dashboard.html?token=${dashboardToken}`;
-  await sendText(
-    jid,
-    `🔐 *Dashboard link:*\n${link}\n\n🔢 *Your PIN:* ${dashboardPin}\n⏱️ *Expires in 10 mins*`
-  );
+  await sendText(jid, `🔐 *Dashboard link:*\n${link}\n\n🔢 *Your PIN:* ${dashboardPin}\n⏱️ *Expires in 10 mins*`);
 }
 
-/* ---------- Google Places helpers (autocomplete + details) ---------- */
+/* ---------- Google Places helpers (ZA) ---------- */
 function ensureSessionToken(state) {
   if (!state.addrSession) state.addrSession = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   return state.addrSession;
@@ -208,17 +193,37 @@ function ensureSessionToken(state) {
 
 async function placesAutocomplete(input, sessionToken) {
   if (!GOOGLE_MAPS_API_KEY) return [];
+  const expanded = expandShortcut(input);
+  const maybeBoosted = boostToZA(expanded);
+
   const url = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
-  const params = { input, key: GOOGLE_MAPS_API_KEY, sessiontoken: sessionToken };
+  const params = {
+    input: maybeBoosted,
+    key: GOOGLE_MAPS_API_KEY,
+    components: GMAPS_COMPONENTS, // country:za
+    language: GMAPS_LANGUAGE,
+    region: GMAPS_REGION,
+    location: `${ZA_CENTER.lat},${ZA_CENTER.lng}`,
+    radius: String(ZA_RADIUS_M),
+    strictbounds: 'true',
+    sessiontoken: sessionToken
+  };
   const { data } = await axios.get(url, { params, timeout: 10000 });
   if (data?.status !== 'OK' || !Array.isArray(data?.predictions)) return [];
-  return data.predictions.slice(0, 5).map(p => ({ place_id: p.place_id, description: p.description }));
+  return data.predictions.slice(0, 8).map(p => ({ place_id: p.place_id, description: p.description }));
 }
 
 async function placeDetails(placeId, sessionToken) {
   if (!GOOGLE_MAPS_API_KEY) return null;
   const url = 'https://maps.googleapis.com/maps/api/place/details/json';
-  const params = { place_id: placeId, fields: 'geometry/location,formatted_address,name', key: GOOGLE_MAPS_API_KEY, sessiontoken: sessionToken };
+  const params = {
+    place_id: placeId,
+    fields: 'geometry/location,formatted_address,name',
+    key: GOOGLE_MAPS_API_KEY,
+    language: GMAPS_LANGUAGE,
+    region: GMAPS_REGION,
+    sessiontoken: sessionToken
+  };
   const { data } = await axios.get(url, { params, timeout: 10000 });
   if (data?.status !== 'OK' || !data?.result?.geometry?.location) return null;
   const loc = data.result.geometry.location;
@@ -230,7 +235,7 @@ function formatSuggestionList(sugs) {
   return sugs.map((s, i) => `${i + 1}) ${s.description}`).join('\n');
 }
 
-/* ---------- rideId -> jid resolver (works even if not cached) ---------- */
+/* ---------- rideId -> jid resolver ---------- */
 async function getWaJidForRideId(rideId) {
   const cached = waRideById.get(String(rideId));
   if (cached) return cached;
@@ -267,31 +272,23 @@ async function setupClient() {
       syncFullHistory: false
     });
 
-    // persist creds
     sock.ev.on('creds.update', saveCreds);
 
-    // connection lifecycle
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-  if (qr) {
-  currentQR = qr;
-  if (SHOW_QR) {
-    try {
-      const term = await qrcode.toString(qr, { type: 'terminal', small: true });
-      console.log('\n' + term);
-    } catch {
-      console.log('Open /qrcode to scan via browser.');
-    }
-  }
-  try {
-    const dataUrl = await qrcode.toDataURL(qr);
-    await saveQrPng(dataUrl);
-    waEvents.emit('qr', dataUrl);
-  } catch (e) {
-    logger.warn('WA: could not create QR dataURL: %s', e?.message || e);
-  }
-}
+      if (qr) {
+        currentQR = qr;
+        if (process.env.WA_SHOW_QR === '1') {
+          try { console.log('\n' + await qrcode.toString(qr, { type: 'terminal', small: true })); }
+          catch { console.log('Open /qrcode to scan via browser.'); }
+        }
+        try {
+          const dataUrl = await qrcode.toDataURL(qr);
+          await saveQrPng(dataUrl);
+          waEvents.emit('qr', dataUrl);
+        } catch (e) { logger.warn('WA: could not create QR dataURL: %s', e?.message || e); }
+      }
 
       if (connection === 'open') {
         currentQR = null;
@@ -336,7 +333,6 @@ async function setupClient() {
           if (fromMe || jid === 'status@broadcast') continue;
 
           const msg = m.message || {};
-
           if (
             msg.protocolMessage ||
             msg.reactionMessage ||
@@ -345,26 +341,18 @@ async function setupClient() {
             msg.ephemeralMessage ||
             msg.viewOnceMessage ||
             msg.viewOnceMessageV2
-          ) {
-            continue;
-          }
+          ) continue;
 
           const loc = msg.locationMessage || null;
           let text =
             msg.conversation ||
             msg.extendedTextMessage?.text ||
             msg.imageMessage?.caption ||
-            msg.videoMessage?.caption ||
-            '';
-
+            msg.videoMessage?.caption || '';
           text = (text || '').trim();
-
           if (!loc && !text) continue;
 
-          if (loc) {
-            await handleLocationMessage(jid, loc);
-            continue;
-          }
+          if (loc) { await handleLocationMessage(jid, loc); continue; }
 
           await handleTextMessage(jid, text);
         } catch (e) {
@@ -381,31 +369,26 @@ async function setupClient() {
   }
 }
 
+const waEvents = new EventEmitter();
+
 /* --------------- message handlers --------------- */
 async function handleTextMessage(jid, raw) {
   if (!raw) return;
   const txt = (raw || '').toLowerCase();
   const state = convo.get(jid) || { stage: 'idle' };
 
-  // persist "seen" and platform
   await upsertWaRider(jid).catch(() => {});
 
-  /* ======= REGISTRATION FLOW =======
-     - If rider is new or missing name/email → collect.
-     - Stages: reg_name → reg_email → save → send dashboard link.
-  */
   const rider = await Rider.findOne({ waJid: jid }).lean().catch(() => null);
   const hasName = !!(rider?.name || waNames.get(jid));
   const hasEmail = !!rider?.email;
 
-  // Kick off registration when user says "start/hi/menu" or if not registered yet
   if ((!hasName || !hasEmail) && (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu' || state.stage === 'idle')) {
     startRegistration(jid);
     await sendText(jid, '👋 Welcome! Please enter your *full name* to register:');
     return;
   }
 
-  // Handle reg_name
   if (state.stage === 'reg_name') {
     const name = raw.trim();
     if (!/^[a-z][a-z\s.'-]{1,}$/i.test(name)) {
@@ -418,32 +401,21 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Handle reg_email
   if (state.stage === 'reg_email') {
     const email = raw.trim();
     if (!EMAIL_RE.test(email)) {
-      await sendText(jid, '❌ Invalid email. Please enter a valid email address like name@example.com');
+      await sendText(jid, '❌ Invalid email. Please enter a valid email like name@example.com');
       return;
     }
-
     const name = state.temp?.name || waNames.get(jid) || 'New Rider';
-    await Rider.findOneAndUpdate(
-      { waJid: jid },
-      { $set: { name, email, platform: 'whatsapp' } },
-      { upsert: true }
-    );
-
-    // Send dashboard link (token + PIN)
+    await Rider.findOneAndUpdate({ waJid: jid }, { $set: { name, email, platform: 'whatsapp' } }, { upsert: true });
     await sendDashboardLinkWA(jid);
-
-    // Completed registration → show main menu
     resetFlow(jid);
     await sendText(jid, `✅ Registration complete, ${name}!`);
     await sendMainMenu(jid);
     return;
   }
 
-  /* ======= RATING CAPTURE (reply 1..5) ======= */
   const pend = ratingAwait.get(jid);
   if (pend && /^[1-5]$/.test(txt)) {
     const stars = Number(txt);
@@ -453,33 +425,26 @@ async function handleTextMessage(jid, raw) {
         ride.driverRating = stars;
         ride.driverRatedAt = new Date();
         await ride.save();
-        if (ride.driverId) {
-          try { await Driver.computeAndUpdateStats(ride.driverId); } catch {}
-        }
+        if (ride.driverId) { try { await Driver.computeAndUpdateStats(ride.driverId); } catch {} }
         await sendText(jid, `✅ Thanks! You rated ${'★'.repeat(stars)} (${stars}/5).`);
       } else {
         await sendText(jid, `This trip is already rated or no longer available.`);
       }
-    } catch {
-      await sendText(jid, `⚠️ Couldn't save your rating. Please try again later.`);
-    } finally {
-      ratingAwait.delete(jid);
-    }
+    } catch { await sendText(jid, `⚠️ Couldn't save your rating. Please try again later.`); }
+    finally { ratingAwait.delete(jid); }
     return;
   }
 
-  /* ======= GLOBAL ENTRY / MENU ======= */
   if (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu') {
     resetFlow(jid);
     await sendMainMenu(jid);
     return;
   }
 
-  // Menu selection is only valid when idle
   if ((state.stage || 'idle') === 'idle') {
     if (txt === '1' || txt === 'book' || txt === 'book trip') {
       startBooking(jid);
-      await sendText(jid, `📍 Send your *pickup* — share location (📎 → Location) *or type the address* and I’ll suggest matches.`);
+      await sendText(jid, `📍 Send your *pickup* — share location (📎 → Location) *or type the address* and I’ll suggest matches (South Africa).`);
       return;
     }
     if (txt === '2' || txt === 'help' || txt === '/help') {
@@ -488,7 +453,7 @@ async function handleTextMessage(jid, raw) {
         `🤖 *How to book*\n` +
         `• Send pickup: share location (📎) *or type an address*\n` +
         `• Send destination the same way\n` +
-        `• Choose vehicle → choose payment (cash/card)\n\n` +
+        `• Choose vehicle → payment (cash/card)\n\n` +
         `Reply *menu* anytime to see options.`
       );
       return;
@@ -503,25 +468,11 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  /* ======= LIGHTWEIGHT NAME CAPTURE (fallback) ======= */
-  if (!waNames.has(jid) && /^[a-z][a-z\s.'-]{1,}$/i.test(raw.trim())) {
-    const nice = raw.trim();
-    waNames.set(jid, nice);
-    await upsertWaRider(jid, { name: nice }).catch(() => {});
-    await sendText(jid, `✅ Nice to meet you, ${nice}!\nType *menu* to see options, or just *1* to book.`);
-    return;
-  }
-
-  /* ======= ADDRESS / BOOKING FLOW ======= */
-
-  // PICKUP: select from suggestions by number
+  // PICKUP selection by number
   if (state.stage === 'await_pickup' && /^\d{1,2}$/.test(txt) && Array.isArray(state.suggestions) && state.suggestions.length) {
     const idx = Number(txt) - 1;
     const choice = state.suggestions[idx];
-    if (!choice) {
-      await sendText(jid, '⚠️ Invalid number. Choose one from the list or type the address again.');
-      return;
-    }
+    if (!choice) { await sendText(jid, '⚠️ Invalid number. Choose one from the list or type the address again.'); return; }
     try {
       const sessionToken = ensureSessionToken(state);
       const det = await placeDetails(choice.place_id, sessionToken);
@@ -538,22 +489,16 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // PICKUP: typed query → suggestions
-  if (state.stage === 'await_pickup' && raw.length >= 3) {
-    if (!GOOGLE_MAPS_API_KEY) {
-      await sendText(jid, '⚠️ Address search unavailable. Please share your pickup using the 📎 attachment.');
-      return;
-    }
+  // PICKUP typed → suggestions (allow acronyms & short tokens)
+  if (state.stage === 'await_pickup' && raw.trim().length >= 2) {
+    if (!GOOGLE_MAPS_API_KEY) { await sendText(jid, '⚠️ Address search unavailable. Please share your pickup using the 📎 attachment.'); return; }
     try {
       const sessionToken = ensureSessionToken(state);
       const sugs = await placesAutocomplete(raw, sessionToken);
-      if (!sugs.length) {
-        await sendText(jid, 'No matches found. Try another address, or share your location (📎).');
-        return;
-      }
+      if (!sugs.length) { await sendText(jid, 'No matches found (ZA). Try another address, or share your location (📎).'); return; }
       state.suggestions = sugs;
       convo.set(jid, state);
-      await sendText(jid, '📍 *Pickup suggestions:*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice or type a new address.');
+      await sendText(jid, '📍 *Pickup suggestions (ZA):*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice or type a new address.');
       return;
     } catch {
       await sendText(jid, '⚠️ Address search failed. Please try again or share your location (📎).');
@@ -561,14 +506,11 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // DESTINATION: select from suggestions by number
+  // DESTINATION selection by number
   if (state.stage === 'await_destination' && /^\d{1,2}$/.test(txt) && Array.isArray(state.suggestions) && state.suggestions.length) {
     const idx = Number(txt) - 1;
     const choice = state.suggestions[idx];
-    if (!choice) {
-      await sendText(jid, '⚠️ Invalid number. Choose one from the list or type the address again.');
-      return;
-    }
+    if (!choice) { await sendText(jid, '⚠️ Invalid number. Choose one from the list or type the address again.'); return; }
     try {
       const sessionToken = ensureSessionToken(state);
       const det = await placeDetails(choice.place_id, sessionToken);
@@ -576,17 +518,11 @@ async function handleTextMessage(jid, raw) {
       state.destination = { lat: det.lat, lng: det.lng };
       state.suggestions = [];
 
-      // quotes
       let quotes = [];
       try {
-        quotes = await getAvailableVehicleQuotes({
-          pickup: state.pickup,
-          destination: state.destination,
-          radiusKm: 30
-        });
-      } catch (e) {
-        console.error('getAvailableVehicleQuotes failed:', e);
-      }
+        quotes = await getAvailableVehicleQuotes({ pickup: state.pickup, destination: state.destination, radiusKm: 30 });
+      } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
+
       if (!quotes.length) {
         state.stage = 'await_pickup';
         convo.set(jid, state);
@@ -598,7 +534,7 @@ async function handleTextMessage(jid, raw) {
       state.stage = 'await_vehicle';
       convo.set(jid, state);
 
-      const lines = quotes.map((q, i) => `${i + 1}) ${VEHICLE_LABEL(q.vehicleType)} — R${q.price}`);
+      const lines = quotes.map((q, i) => `${i + 1}) ${q.vehicleType === 'comfort' ? 'Comfort' : q.vehicleType === 'luxury' ? 'Luxury' : q.vehicleType === 'xl' ? 'XL' : 'Normal'} — R${q.price}`);
       await sendText(jid, '🚘 Select your ride:\n' + lines.join('\n') + '\n\nReply with the *number* of your choice.');
       return;
     } catch {
@@ -607,22 +543,16 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // DESTINATION: typed query → suggestions
-  if (state.stage === 'await_destination' && raw.length >= 3) {
-    if (!GOOGLE_MAPS_API_KEY) {
-      await sendText(jid, '⚠️ Address search unavailable. Please share your destination using the 📎 attachment.');
-      return;
-    }
+  // DEST typed → suggestions
+  if (state.stage === 'await_destination' && raw.trim().length >= 2) {
+    if (!GOOGLE_MAPS_API_KEY) { await sendText(jid, '⚠️ Address search unavailable. Please share your destination using the 📎 attachment.'); return; }
     try {
       const sessionToken = ensureSessionToken(state);
       const sugs = await placesAutocomplete(raw, sessionToken);
-      if (!sugs.length) {
-        await sendText(jid, 'No matches found. Try another address, or share your location (📎).');
-        return;
-      }
+      if (!sugs.length) { await sendText(jid, 'No matches found (ZA). Try another address, or share your location (📎).'); return; }
       state.suggestions = sugs;
       convo.set(jid, state);
-      await sendText(jid, '📍 *Destination suggestions:*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice or type a new address.');
+      await sendText(jid, '📍 *Destination suggestions (ZA):*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice or type a new address.');
       return;
     } catch {
       await sendText(jid, '⚠️ Address search failed. Please try again or share your location (📎).');
@@ -634,19 +564,15 @@ async function handleTextMessage(jid, raw) {
   if (state.stage === 'await_vehicle' && /^\d{1,2}$/.test(txt)) {
     const idx = Number(txt) - 1;
     const q = state.quotes?.[idx];
-    if (!q) {
-      await sendText(jid, '⚠️ Invalid choice. Reply with a valid number from the list.');
-      return;
-    }
+    if (!q) { await sendText(jid, '⚠️ Invalid choice. Reply with a valid number from the list.'); return; }
     state.chosenVehicle = q.vehicleType;
     state.price = q.price;
 
-    // Create Ride (payment pending)
     const ride = await Ride.create({
       pickup: state.pickup,
       destination: state.destination,
       estimate: q.price,
-      paymentMethod: 'cash',        // default; may change in payment step
+      paymentMethod: 'cash',
       vehicleType: q.vehicleType,
       status: 'payment_pending',
       platform: 'whatsapp',
@@ -658,16 +584,17 @@ async function handleTextMessage(jid, raw) {
     state.stage = 'await_payment';
     convo.set(jid, state);
 
+    const label = q.vehicleType === 'comfort' ? 'Comfort' : q.vehicleType === 'luxury' ? 'Luxury' : q.vehicleType === 'xl' ? 'XL' : 'Normal';
     const summary =
       `🧾 *Trip Summary*\n` +
-      `• Vehicle: ${VEHICLE_LABEL(q.vehicleType)}\n` +
+      `• Vehicle: ${label}\n` +
       `• Estimate: R${q.price}\n` +
       `• Pickup: (${state.pickup.lat.toFixed(5)}, ${state.pickup.lng.toFixed(5)})\n` +
       `• Drop:   (${state.destination.lat.toFixed(5)}, ${state.destination.lng.toFixed(5)})\n\n` +
       `Choose payment:\n` +
       `1) 💵 Cash\n` +
       `2) 💳 Card (PayFast)\n` +
-      `Reply with *1* or *2*.`
+      `Reply with *1* or *2*.`;
 
     await sendText(jid, summary);
     return;
@@ -677,19 +604,12 @@ async function handleTextMessage(jid, raw) {
   if (state.stage === 'await_payment') {
     if (txt === '1' || txt === 'cash') {
       const ride = await Ride.findById(state.rideId);
-      if (!ride) {
-        resetFlow(jid);
-        await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.');
-        return;
-      }
+      if (!ride) { resetFlow(jid); await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.'); return; }
       ride.paymentMethod = 'cash';
       ride.status = 'pending';
       await ride.save();
 
-      riderEvents.emit('booking:new', {
-        rideId: String(ride._id),
-        vehicleType: state.chosenVehicle
-      });
+      riderEvents.emit('booking:new', { rideId: String(ride._id), vehicleType: state.chosenVehicle });
 
       await sendText(jid, '✅ Cash selected. Requesting the nearest driver for you…');
       resetFlow(jid);
@@ -698,11 +618,7 @@ async function handleTextMessage(jid, raw) {
 
     if (txt === '2' || txt === 'card' || txt === 'payfast') {
       const rideId = state.rideId;
-      if (!rideId) {
-        resetFlow(jid);
-        await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.');
-        return;
-      }
+      if (!rideId) { resetFlow(jid); await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.'); return; }
       const link = `${PUBLIC_URL}/pay/${encodeURIComponent(rideId)}`;
       await sendText(jid, `💳 Pay with card here:\n${link}\n\nAfter payment, we’ll notify a driver.`);
       resetFlow(jid);
@@ -713,17 +629,9 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // If nothing else matched and we’re mid-flow, give a contextual hint.
-  if (state.stage === 'await_pickup') {
-    await sendText(jid, `📍 Please send your *pickup* — share location (📎) or type the address for suggestions.`);
-    return;
-  }
-  if (state.stage === 'await_destination') {
-    await sendText(jid, `📍 Please send your *destination* — share location (📎) or type the address for suggestions.`);
-    return;
-  }
+  if (state.stage === 'await_pickup') { await sendText(jid, `📍 Please send your *pickup* — share location (📎) or type the address for suggestions.`); return; }
+  if (state.stage === 'await_destination') { await sendText(jid, `📍 Please send your *destination* — share location (📎) or type the address for suggestions.`); return; }
 
-  // Idle fallback
   if ((convo.get(jid)?.stage || 'idle') === 'idle') {
     await sendMainMenu(jid);
   }
@@ -733,15 +641,10 @@ async function handleLocationMessage(jid, locationMessage) {
   const lat = locationMessage.degreesLatitude;
   const lng = locationMessage.degreesLongitude;
 
-  // persist last location for rider profile
   await upsertWaRider(jid, { lastLocation: { lat, lng } }).catch(() => {});
-
   const state = convo.get(jid) || { stage: 'idle' };
 
-  if (state.stage === 'idle') {
-    startBooking(jid);
-    state.stage = 'await_pickup';
-  }
+  if (state.stage === 'idle') { startBooking(jid); state.stage = 'await_pickup'; }
 
   if (state.stage === 'await_pickup') {
     state.pickup = { lat, lng };
@@ -756,17 +659,10 @@ async function handleLocationMessage(jid, locationMessage) {
     state.destination = { lat, lng };
     state.suggestions = [];
 
-    // quotes
     let quotes = [];
     try {
-      quotes = await getAvailableVehicleQuotes({
-        pickup: state.pickup,
-        destination: state.destination,
-        radiusKm: 30
-      });
-    } catch (e) {
-      console.error('getAvailableVehicleQuotes failed:', e);
-    }
+      quotes = await getAvailableVehicleQuotes({ pickup: state.pickup, destination: state.destination, radiusKm: 30 });
+    } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
 
     if (!quotes.length) {
       state.stage = 'await_pickup';
@@ -780,7 +676,7 @@ async function handleLocationMessage(jid, locationMessage) {
     state.stage = 'await_vehicle';
     convo.set(jid, state);
 
-    const lines = quotes.map((q, i) => `${i + 1}) ${VEHICLE_LABEL(q.vehicleType)} — R${q.price}`);
+    const lines = quotes.map((q, i) => `${i + 1}) ${q.vehicleType === 'comfort' ? 'Comfort' : q.vehicleType === 'luxury' ? 'Luxury' : q.vehicleType === 'xl' ? 'XL' : 'Normal'} — R${q.price}`);
     await sendText(jid, '🚘 Select your ride:\n' + lines.join('\n') + '\n\nReply with the *number* of your choice.');
     return;
   }
@@ -837,29 +733,18 @@ export function initWhatsappBot() {
   setupClient();
 }
 
-export function isWhatsAppConnected() {
-  return !!(sock && sock.ws && sock.ws.readyState === 1);
-}
+export function isWhatsAppConnected() { return !!(sock && sock.ws && sock.ws.readyState === 1); }
+export function getConnectionStatus() { return connState; }
 
-export function getConnectionStatus() {
-  return connState;
-}
-
-/** Wait for a QR (or return the cached one) and give back a data: URL */
 export async function waitForQrDataUrl(timeoutMs = 25000) {
   if (currentQR) return qrcode.toDataURL(currentQR);
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('timeout waiting for QR')), timeoutMs);
-    waEvents.once('qr', (dataUrl) => {
-      clearTimeout(t);
-      resolve(dataUrl);
-    });
+    waEvents.once('qr', (dataUrl) => { clearTimeout(t); resolve(dataUrl); });
   });
 }
 
-export async function sendWhatsAppMessage(jid, text) {
-  return sendText(jid, text);
-}
+export async function sendWhatsAppMessage(jid, text) { return sendText(jid, text); }
 
 export async function resetWhatsAppSession() {
   try {
