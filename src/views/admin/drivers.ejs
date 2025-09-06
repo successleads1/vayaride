@@ -16,7 +16,14 @@ main{flex:1;padding:20px;display:grid;gap:16px}
 h2{margin:0 0 10px;font-size:18px}
 .table{width:100%;border-collapse:collapse}
 .table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left}
-.filter{margin-bottom:10px;color:#bbb}
+.filter{margin-bottom:12px;color:#bbb;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.input{background:#0b0b0b;border:1px solid var(--border);color:#fff;padding:10px 12px;border-radius:8px;min-width:240px}
+.btn{background:#111;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;cursor:pointer}
+.badge{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222}
+.muted{color:var(--muted)}
+.pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.pager a, .pager span{padding:6px 10px;border-radius:8px;border:1px solid #222;text-decoration:none;color:#fff}
+.pager .current{background:#111}
 </style></head><body>
 <div class="layout">
   <aside>
@@ -35,23 +42,40 @@ h2{margin:0 0 10px;font-size:18px}
       <button style="background:#111;color:#fff;border:1px solid #222;padding:8px 10px;border-radius:8px;cursor:pointer">Logout</button>
     </form>
   </aside>
+
   <main>
     <section class="card">
       <h2>Drivers</h2>
-      <div class="filter">Filter: 
-        <a href="/admin/drivers">All</a> •
-        <a href="/admin/drivers?status=pending">Pending</a> •
-        <a href="/admin/drivers?status=approved">Approved</a> •
-        <a href="/admin/drivers?status=rejected">Rejected</a>
-      </div>
+
+      <!-- Search + status filter (same route) -->
+      <form class="filter" method="GET" action="/admin/drivers" id="searchForm">
+        <input class="input" type="text" name="q" id="q"
+               placeholder="Search name, email, vehicle, phone, or id…"
+               value="<%= (typeof q !== 'undefined' ? q : '') %>" />
+        <select class="input" name="status" id="status" style="min-width:160px">
+          <option value="">All statuses</option>
+          <option value="pending"  <%= status==='pending'  ? 'selected' : '' %>>Pending</option>
+          <option value="approved" <%= status==='approved' ? 'selected' : '' %>>Approved</option>
+          <option value="rejected" <%= status==='rejected' ? 'selected' : '' %>>Rejected</option>
+        </select>
+        <input type="hidden" name="page" value="1"/>
+        <button class="btn" type="submit">Search</button>
+        <% if (pagination) { %>
+          <span class="muted">Page <%= pagination.page %> / <%= pagination.totalPages %> • <%= pagination.total %> results</span>
+        <% } %>
+      </form>
+
       <table class="table">
         <thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Vehicle</th><th>Joined</th><th>Action</th></tr></thead>
         <tbody>
-          <% drivers.forEach(d => { %>
+          <% if (!drivers || drivers.length === 0) { %>
+            <tr><td colspan="6" class="muted">No drivers found.</td></tr>
+          <% } %>
+          <% (drivers || []).forEach(d => { %>
             <tr>
               <td><%= d.name %></td>
               <td><%= d.email %></td>
-              <td><%= d.status %></td>
+              <td><span class="badge"><%= d.status %></span></td>
               <td><%= d.vehicleType || '-' %></td>
               <td><%= new Date(d.createdAt).toLocaleString() %></td>
               <td><a href="/admin/drivers/<%= d._id %>">Open</a></td>
@@ -59,7 +83,48 @@ h2{margin:0 0 10px;font-size:18px}
           <% }) %>
         </tbody>
       </table>
+
+      <% if (pagination) { %>
+      <div class="pager">
+        <% const mk = (p)=>`/admin/drivers?status=${encodeURIComponent(status||'')}&q=${encodeURIComponent(q||'')}&page=${p}&limit=${pagination.limit}&sort=${encodeURIComponent(pagination.sort||'-createdAt')}` %>
+        <% if (pagination.page > 1) { %>
+          <a href="<%= mk(1) %>">« First</a>
+          <a href="<%= mk(pagination.page-1) %>">‹ Prev</a>
+        <% } else { %>
+          <span>« First</span><span>‹ Prev</span>
+        <% } %>
+
+        <span class="current">Page <%= pagination.page %> / <%= pagination.totalPages %></span>
+
+        <% if (pagination.page < pagination.totalPages) { %>
+          <a href="<%= mk(pagination.page+1) %>">Next ›</a>
+          <a href="<%= mk(pagination.totalPages) %>">Last »</a>
+        <% } else { %>
+          <span>Next ›</span><span>Last »</span>
+        <% } %>
+      </div>
+      <% } %>
     </section>
   </main>
 </div>
+
+<script>
+  // Optional: light “instant” search that still uses the SAME route (no new API).
+  // It just reloads the page with debounced query updates.
+  const q = document.getElementById('q');
+  const status = document.getElementById('status');
+  let t = null;
+  const debounce = (fn, ms)=> (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); };
+
+  function go() {
+    const url = new URL(window.location.origin + '/admin/drivers');
+    if (q.value.trim()) url.searchParams.set('q', q.value.trim());
+    if (status.value)   url.searchParams.set('status', status.value);
+    url.searchParams.set('page', '1');
+    window.location.href = url.toString();
+  }
+
+  q.addEventListener('input', debounce(go, 350));
+  status.addEventListener('change', go);
+</script>
 </body></html>
