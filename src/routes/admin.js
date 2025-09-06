@@ -1,10 +1,11 @@
 // src/routes/admin.js
 import express from 'express';
 import passport from 'passport';
+import mongoose from 'mongoose';
 import Driver from '../models/Driver.js';
 import Rider from '../models/Rider.js';
-import Ride from '../models/Ride.js';           // ✨ NEW
-import Activity from '../models/Activity.js';   // ✨ NEW
+import Ride from '../models/Ride.js';
+import Activity from '../models/Activity.js';
 import { sendApprovalNotice } from '../bots/driverBot.js';
 
 const router = express.Router();
@@ -22,6 +23,29 @@ const ensureGuest = (req, res, next) => {
   }
   return next();
 };
+
+function escapeRegex(s = '') {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function buildDriverFilter({ q, status }) {
+  const filter = {};
+  if (status && ['pending', 'approved', 'rejected'].includes(String(status))) {
+    filter.status = status;
+  }
+  if (q && q.trim()) {
+    const text = q.trim();
+    const rx = new RegExp(escapeRegex(text), 'i');
+    const maybeId = mongoose.isValidObjectId(text) ? new mongoose.Types.ObjectId(text) : null;
+    filter.$or = [
+      { name: rx },
+      { email: rx },
+      { phone: rx },
+      { vehicleType: rx },
+      ...(maybeId ? [{ _id: maybeId }] : []),
+    ];
+  }
+  return filter;
+}
 
 /* ------------ auth screens ------------ */
 router.get('/login', ensureGuest, (req, res) => {
@@ -78,12 +102,43 @@ router.get('/', ensureAdmin, async (req, res) => {
   });
 });
 
-/* ------------ drivers list ------------ */
+/* ------------ drivers list (search + pagination) ------------ */
 router.get('/drivers', ensureAdmin, async (req, res) => {
-  const q = {};
-  if (req.query.status) q.status = req.query.status;
-  const drivers = await Driver.find(q).sort({ createdAt: -1 }).lean();
-  res.render('admin/drivers', { admin: req.user, drivers });
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const sort = typeof req.query.sort === 'string' ? req.query.sort : '-createdAt';
+
+    const page = typeof req.query.page === 'string' ? req.query.page : '1';
+    const limit = typeof req.query.limit === 'string' ? req.query.limit : '20';
+
+    const pageNum = Math.max(1, Number.parseInt(String(page), 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(limit), 10) || 20));
+
+    const filter = buildDriverFilter({ q, status });
+
+    const [total, drivers] = await Promise.all([
+      Driver.countDocuments(filter),
+      Driver.find(filter)
+        .sort(String(sort))
+        .skip((pageNum - 1) * pageSize)
+        .limit(pageSize)
+        .lean(),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+    res.render('admin/drivers', {
+      admin: req.user,
+      drivers,
+      q,
+      status,
+      pagination: { total, page: pageNum, limit: pageSize, totalPages, sort: String(sort) }
+    });
+  } catch (e) {
+    console.error('admin/drivers error:', e);
+    res.status(500).send('Server error');
+  }
 });
 
 /* ------------ single driver (recompute stats before render) ------------ */
@@ -91,10 +146,8 @@ router.get('/drivers/:id', ensureAdmin, async (req, res) => {
   try {
     const id = req.params.id;
 
-    // 🔁 Recompute rating + totals from rides first so avgRating/ratingsCount are fresh
     await Driver.computeAndUpdateStats(id);
 
-    // Fetch latest driver doc for the view
     const d = await Driver.findById(id).lean();
     if (!d) return res.redirect('/admin/drivers');
 
