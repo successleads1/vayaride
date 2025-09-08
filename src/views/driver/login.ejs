@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>VayaRide • Driver Login</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --bg:#000; --card:#111; --text:#fff; --muted:#bbb; --accent:#fff; --border:#222; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;min-height:100vh;display:grid;place-items:center;padding:24px}
+    .card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px}
+    .logo{display:block;margin:8px auto 16px;width:110px;height:110px;border-radius:50%;border:3px solid #fff;object-fit:cover}
+    h1{margin:6px 0 8px;text-align:center;font-size:22px}
+    p.sub{margin:0 0 18px;text-align:center;color:var(--muted)}
+    label{font-size:14px;margin:12px 0 6px;display:block}
+    input{width:100%;padding:12px 14px;border-radius:8px;border:1px solid var(--border);background:#1a1a1a;color:var(--text)}
+    button{width:100%;margin-top:16px;padding:12px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#000;font-weight:700;cursor:pointer}
+    button:hover{filter:brightness(0.9)}
+    .row{display:flex;justify-content:space-between;gap:12px;margin-top:14px}
+    a{color:#fff;text-decoration:none;border-bottom:1px dotted #555}
+    .msg{margin:8px 0 0;color:#ff6b6b;text-align:center;min-height:20px}
+    .footer{margin-top:18px;text-align:center;color:var(--muted);font-size:13px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img class="logo" src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide" />
+    <h1>Driver Login</h1>
+    <p class="sub">Welcome back to VayaRide</p>
+
+    <% if (typeof error !== 'undefined' && error) { %>
+      <div class="msg"><%= error %></div>
+    <% } %>
+
+    <form method="POST" action="/driver/login" autocomplete="on">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required placeholder="you@example.com" value="<%= typeof email !== 'undefined' ? email : '' %>" />
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required placeholder="********" />
+
+      <button type="submit">Sign in</button>
+    </form>
+
+    <div class="row">
+      <a href="/driver/register">Create account</a>
+      <a href="/">Back to home</a>
+    </div>
+
+    <div class="footer">© <%= new Date().getFullYear() %> VayaRide</div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Driver Register • VayaRide</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; background:#000; color:#fff; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { max-width:560px; margin:40px auto; padding:20px; background:#111; border-radius:10px; box-shadow:0 0 20px rgba(255,255,255,.06); }
+    h1 { text-align:center }
+    label { display:block; margin-top:14px; font-weight:600 }
+    input, select { width:100%; padding:12px; border:none; border-radius:6px; background:#222; color:#fff; margin-top:6px; }
+    button { width:100%; margin-top:16px; padding:12px; border:none; border-radius:6px; font-weight:700; background:#fff; color:#000; cursor:pointer }
+    button:hover { background:#ddd }
+    .err { color:#ff6b6b; margin-top:10px; text-align:center }
+    .topback { display:block; text-align:center; margin:20px auto 0; color:#fff; opacity:.8; text-decoration:none }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Driver Registration</h1>
+
+    <% if (error) { %><div class="err"><%= error %></div><% } %>
+
+    <form method="post" action="/driver/register">
+      <label>Name</label>
+      <input name="name" required />
+
+      <label>Email</label>
+      <input name="email" type="email" required />
+
+      <label>Phone</label>
+      <input name="phone" />
+
+      <label>Password</label>
+      <input name="password" type="password" required />
+
+      <label>Vehicle Type</label>
+      <select name="vehicleType">
+        <option value="normal">VayaRide Normal</option>
+        <option value="comfort">VayaRide Comfort</option>
+        <option value="luxury">VayaRide Luxury</option>
+        <option value="xl">VayaRide XL</option>
+      </select>
+
+      <button type="submit">Create Account</button>
+    </form>
+
+    <a class="topback" href="/driver/login">Have an account? Log in</a>
+    <a class="topback" href="/">← Back to Home</a>
+  </div>
+</body>
+</html>

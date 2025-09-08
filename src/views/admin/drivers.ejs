@@ -1,0 +1,288 @@
+<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin • Drivers</title>
+<style>
+:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+.layout{display:flex;min-height:100vh}
+aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand img{width:44px;height:44px;border-radius:50%;border:2px solid #fff}
+.brand h1{font-size:16px;margin:0}
+nav a{display:block;padding:10px;border-radius:8px;text-decoration:none;color:#fff;border:1px solid transparent}
+nav a:hover{background:#101010;border-color:#222}
+main{flex:1;padding:20px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+h2{margin:0 0 10px;font-size:18px}
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left}
+.filter{margin-bottom:12px;color:#bbb;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.input{background:#0b0b0b;border:1px solid var(--border);color:#fff;padding:10px 12px;border-radius:8px;min-width:240px}
+.btn{background:#111;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px;align-items:center}
+.btn.danger{background:#250b0b;border-color:#661515}
+.btn.primary{background:#0b1433;border-color:#1b3ea4}
+.badge{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222}
+.muted{color:var(--muted)}
+.pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.pager a, .pager span{padding:6px 10px;border-radius:8px;border:1px solid #222;text-decoration:none;color:#fff}
+.pager .current{background:#111}
+
+/* modal */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:20px;z-index:999}
+.modal{background:#0f0f0f;border:1px solid var(--border);border-radius:12px;max-width:620px;width:100%;padding:16px}
+.modal h3{margin:0 0 10px}
+.modal .row{margin:8px 0;color:#ddd}
+.modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:12px}
+.modal input[type="text"], .modal input[type="email"], .modal textarea, .modal select{
+  width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px
+}
+.modal textarea{min-height:160px;resize:vertical}
+.small{font-size:12px;color:#aaa}
+</style></head><body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="">
+      <h1>VayaRide Admin</h1>
+    </div>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/admin/drivers">Drivers</a>
+      <a href="/admin/drivers?status=pending">Pending Drivers</a>
+      <a href="/admin/drivers?status=approved">Approved Drivers</a>
+      <a href="/admin/drivers?status=rejected">Rejected Drivers</a>
+    </nav>
+    <form action="/admin/logout" method="POST" style="margin-top:12px">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+  </aside>
+
+  <main>
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <h2>Drivers</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <!-- Bulk email + bulk delete -->
+          <button class="btn primary" id="btn-bulk-email">Email Selected</button>
+          <button class="btn danger" id="btn-bulk-del">Delete Selected</button>
+        </div>
+      </div>
+
+      <!-- Search + status filter (same route) -->
+      <form class="filter" method="GET" action="/admin/drivers" id="searchForm">
+        <input class="input" type="text" name="q" id="q"
+               placeholder="Search name, email, vehicle, phone, or id…"
+               value="<%= (typeof q !== 'undefined' ? q : '') %>" />
+        <select class="input" name="status" id="status" style="min-width:160px">
+          <option value="">All statuses</option>
+          <option value="pending"  <%= status==='pending'  ? 'selected' : '' %>>Pending</option>
+          <option value="approved" <%= status==='approved' ? 'selected' : '' %>>Approved</option>
+          <option value="rejected" <%= status==='rejected' ? 'selected' : '' %>>Rejected</option>
+        </select>
+        <input type="hidden" name="page" value="1"/>
+        <button class="btn" type="submit">Search</button>
+        <% if (pagination) { %>
+          <span class="muted">Page <%= pagination.page %> / <%= pagination.totalPages %> • <%= pagination.total %> results</span>
+        <% } %>
+      </form>
+
+      <table class="table">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="sel-all"/></th>
+            <th>Name</th><th>Email</th><th>Status</th><th>Vehicle</th><th>Joined</th><th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% if (!drivers || drivers.length === 0) { %>
+            <tr><td colspan="7" class="muted">No drivers found.</td></tr>
+          <% } %>
+          <% (drivers || []).forEach(d => { %>
+            <tr>
+              <td><input type="checkbox" class="sel" value="<%= d._id %>" data-email="<%= d.email %>" data-name="<%= d.name %>"/></td>
+              <td><%= d.name %></td>
+              <td><%= d.email %></td>
+              <td><span class="badge"><%= d.status %></span></td>
+              <td><%= d.vehicleType || '-' %></td>
+              <td><%= new Date(d.createdAt).toLocaleString() %></td>
+              <td style="display:flex;gap:8px;flex-wrap:wrap">
+                <a class="btn" href="/admin/drivers/<%= d._id %>">Open</a>
+                <button class="btn primary btn-email" data-id="<%= d._id %>" data-email="<%= d.email %>" data-name="<%= d.name %>">Email</button>
+                <button class="btn danger btn-del" data-id="<%= d._id %>" data-name="<%= d.name %>">Delete</button>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+
+      <% if (pagination) { %>
+      <div class="pager">
+        <% const mk = (p)=>`/admin/drivers?status=${encodeURIComponent(status||'')}&q=${encodeURIComponent(q||'')}&page=${p}&limit=${pagination.limit}&sort=${encodeURIComponent(pagination.sort||'-createdAt')}` %>
+        <% if (pagination.page > 1) { %>
+          <a href="<%= mk(1) %>">« First</a>
+          <a href="<%= mk(pagination.page-1) %>">‹ Prev</a>
+        <% } else { %>
+          <span>« First</span><span>‹ Prev</span>
+        <% } %>
+
+        <span class="current">Page <%= pagination.page %> / <%= pagination.totalPages %></span>
+
+        <% if (pagination.page < pagination.totalPages) { %>
+          <a href="<%= mk(pagination.page+1) %>">Next ›</a>
+          <a href="<%= mk(pagination.totalPages) %>">Last »</a>
+        <% } else { %>
+          <span>Next ›</span><span>Last »</span>
+        <% } %>
+      </div>
+      <% } %>
+    </section>
+  </main>
+</div>
+
+<!-- Confirm Delete Modal -->
+<div class="modal-backdrop" id="modal-del">
+  <div class="modal">
+    <h3>Delete driver</h3>
+    <div class="row" id="del-text">Are you sure?</div>
+    <form id="del-form" method="POST" action="">
+      <input type="hidden" name="selectedIds" id="selectedIds"/>
+      <div class="actions">
+        <button type="button" class="btn" id="del-cancel">Cancel</button>
+        <button type="submit" class="btn danger">Delete</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Email Modal -->
+<div class="modal-backdrop" id="modal-email">
+  <div class="modal">
+    <h3>Send email to driver(s)</h3>
+
+    <div class="row small" id="email-recipients-info">Recipient: —</div>
+
+    <form id="email-form" method="POST" action="/admin/drivers/email">
+      <input type="hidden" name="mode" id="email-mode" value="single"/>
+      <input type="hidden" name="driverId" id="email-driverId" value=""/>
+      <input type="hidden" name="selectedIds" id="email-selectedIds" value=""/>
+
+      <div class="row">
+        <label>Subject</label>
+        <input type="text" name="subject" required placeholder="Subject"/>
+      </div>
+      <div class="row">
+        <label>Message</label>
+        <textarea name="message" required placeholder="Write your message…"></textarea>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn" id="email-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Send Email</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  // Debounced search (same route)
+  const q = document.getElementById('q');
+  const statusSel = document.getElementById('status');
+  let t = null;
+  const debounce = (fn, ms)=> (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); };
+  function go() {
+    const url = new URL(window.location.origin + '/admin/drivers');
+    if (q.value.trim()) url.searchParams.set('q', q.value.trim());
+    if (statusSel.value) url.searchParams.set('status', statusSel.value);
+    url.searchParams.set('page', '1');
+    window.location.href = url.toString();
+  }
+  q.addEventListener('input', debounce(go, 350));
+  statusSel.addEventListener('change', go);
+
+  // Select all checkboxes
+  const selAll = document.getElementById('sel-all');
+  selAll?.addEventListener('change', e => {
+    document.querySelectorAll('.sel').forEach(cb => { cb.checked = selAll.checked; });
+  });
+
+  /* ---------- Delete modal logic ---------- */
+  const modalDel = document.getElementById('modal-del');
+  const delText = document.getElementById('del-text');
+  const delForm = document.getElementById('del-form');
+  const delCancel = document.getElementById('del-cancel');
+  const selectedIdsInput = document.getElementById('selectedIds');
+
+  function openModalSingleDelete(id, name) {
+    delText.textContent = `Are you sure you want to delete “${name || id}”? This cannot be undone.`;
+    delForm.action = `/admin/drivers/${encodeURIComponent(id)}/delete`;
+    selectedIdsInput.value = '';
+    modalDel.style.display = 'flex';
+  }
+  function openModalBulkDelete(ids) {
+    delText.textContent = `Are you sure you want to delete ${ids.length} driver(s)? This cannot be undone.`;
+    delForm.action = `/admin/drivers/bulk-delete`;
+    selectedIdsInput.value = ids.join(',');
+    modalDel.style.display = 'flex';
+  }
+  function closeDelModal() { modalDel.style.display = 'none'; }
+  delCancel.addEventListener('click', closeDelModal);
+  modalDel.addEventListener('click', (e) => { if (e.target === modalDel) closeDelModal(); });
+
+  document.querySelectorAll('.btn-del').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      openModalSingleDelete(btn.dataset.id, btn.dataset.name);
+    });
+  });
+  document.getElementById('btn-bulk-del').addEventListener('click', () => {
+    const ids = Array.from(document.querySelectorAll('.sel:checked')).map(cb => cb.value);
+    if (ids.length === 0) { alert('Select at least one driver to delete.'); return; }
+    openModalBulkDelete(ids);
+  });
+
+  /* ---------- Email modal logic ---------- */
+  const modalEmail = document.getElementById('modal-email');
+  const emailInfo = document.getElementById('email-recipients-info');
+  const emailForm = document.getElementById('email-form');
+  const emailMode = document.getElementById('email-mode');
+  const emailDriverId = document.getElementById('email-driverId');
+  const emailSelectedIds = document.getElementById('email-selectedIds');
+  const emailCancel = document.getElementById('email-cancel');
+
+  function openModalSingleEmail(id, name, email) {
+    emailInfo.textContent = `Recipient: ${name || id} <${email || 'unknown'}>`;
+    emailMode.value = 'single';
+    emailDriverId.value = id;
+    emailSelectedIds.value = '';
+    modalEmail.style.display = 'flex';
+  }
+  function openModalBulkEmail(rows) {
+    const ids = rows.map(r => r.value);
+    const names = rows.map(r => r.dataset.name || r.dataset.email || r.value);
+    emailInfo.textContent = `Recipients: ${names.slice(0,4).join(', ')}${names.length>4?' …':''} (${names.length} total)`;
+    emailMode.value = 'bulk';
+    emailDriverId.value = '';
+    emailSelectedIds.value = ids.join(',');
+    modalEmail.style.display = 'flex';
+  }
+  function closeEmailModal(){ modalEmail.style.display='none'; }
+
+  emailCancel.addEventListener('click', closeEmailModal);
+  modalEmail.addEventListener('click', (e)=>{ if (e.target === modalEmail) closeEmailModal(); });
+
+  // Per-row email button
+  document.querySelectorAll('.btn-email').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      openModalSingleEmail(btn.dataset.id, btn.dataset.name, btn.dataset.email);
+    });
+  });
+
+  // Bulk email button
+  document.getElementById('btn-bulk-email').addEventListener('click', () => {
+    const rows = Array.from(document.querySelectorAll('.sel:checked'));
+    if (rows.length === 0) { alert('Select at least one driver to email.'); return; }
+    openModalBulkEmail(rows);
+  });
+</script>
+</body></html>
