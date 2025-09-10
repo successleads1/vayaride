@@ -33,3 +33,6 @@ Thumbs.db
 # Upload/output (none expected, but safe to ignore)
 uploads/
 public/uploads/
+
+# Generated WhatsApp QR
+public/wa-qr.png
