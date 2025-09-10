@@ -7,6 +7,7 @@ import fetch from 'node-fetch';
 import { getAvailableVehicleQuotes } from '../services/pricing.js';
 import Ride from '../models/Ride.js';
 import Rider from '../models/Rider.js';
+import { sendAdminEmailToDrivers } from '../services/mailer.js';
 
 export const riderEvents = new EventEmitter();
 
@@ -22,8 +23,11 @@ const MODE = process.env.TELEGRAM_MODE || 'polling'; // 'polling' | 'webhook'
 const token = process.env.TELEGRAM_RIDER_BOT_TOKEN;
 if (!token) throw new Error('TELEGRAM_RIDER_BOT_TOKEN is not defined in .env');
 
-const PUBLIC_URL = process.env.PUBLIC_URL || '';
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
 const RIDER_WEBHOOK_PATH = process.env.TELEGRAM_RIDER_WEBHOOK_PATH || '/telegram/rider';
+
+const SUPPORT_EMAIL = (process.env.SUPPORT_EMAIL || 'admin@vayaride.co.za').trim();
+const TG_HELPDESK_URL = (process.env.TELEGRAM_HELPDESK_URL || 'https://t.me/yourSupportBot').trim();
 
 // ✅ Force ZA by default; can override via env
 const GMAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
@@ -188,6 +192,49 @@ async function emitRiderLocation(chatId, loc) {
   try { ioRef?.emit('rider:location', { chatId, location: loc }); } catch {}
 }
 
+/* ---------- Support helpers ---------- */
+function mainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '🚕 Book Trip', callback_data: 'book_trip' }],
+      [{ text: '👤 Profile', callback_data: 'open_dashboard' }],
+      [{ text: '🧑‍💼 Support', callback_data: 'support' }]
+    ]
+  };
+}
+
+async function triggerSupportEmail(chatId, context = 'Telegram rider support') {
+  try {
+    const rider = await Rider.findOne({ chatId }).lean().catch(() => null);
+    const subject = 'Telegram Support Request — VayaRide';
+    const html =
+      `<p>A rider opened Support in the Telegram bot.</p>
+       <ul>
+         <li><strong>Platform:</strong> Telegram</li>
+         <li><strong>Chat ID:</strong> ${chatId}</li>
+         <li><strong>Name:</strong> ${rider?.name || '—'}</li>
+         <li><strong>Email:</strong> ${rider?.email || '—'}</li>
+         <li><strong>When:</strong> ${new Date().toLocaleString()}</li>
+         <li><strong>Context:</strong> ${context}</li>
+       </ul>`;
+    await sendAdminEmailToDrivers(SUPPORT_EMAIL, { subject, html });
+  } catch (e) {
+    console.warn('Support email trigger failed:', e?.message || e);
+  }
+}
+
+async function showSupport(chatId, context = 'menu') {
+  const msg =
+    `🧑‍💼 <b>Support</b>\n` +
+    `If you’re having issues:\n\n` +
+    `• Email: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>\n` +
+    
+    `We’re here to help.`;
+  await riderBot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+  // Notify admin team
+  await triggerSupportEmail(chatId, `User opened Support (${context})`);
+}
+
 /* ---------- UX prompts ---------- */
 function askPickup(chatId) {
   return riderBot.sendMessage(
@@ -240,7 +287,8 @@ function wireRiderHandlers() {
   if (globalThis.__riderBotSingleton.wired) return;
   globalThis.__riderBotSingleton.wired = true;
 
-  riderBot.onText(/\/start/, async (msg) => {
+  // /start
+  riderBot.onText(/\/start/i, async (msg) => {
     const chatId = msg.chat.id;
     riderState.delete(chatId);
 
@@ -255,17 +303,11 @@ function wireRiderHandlers() {
       await riderBot.sendMessage(chatId, '👋 Welcome! Please enter your full name to register:');
     } else {
       await riderBot.sendMessage(chatId, '👋 Welcome back! Choose an option:', {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🚕 Book Trip', callback_data: 'book_trip' }],
-            [{ text: '💳 Add Credit', callback_data: 'open_dashboard' }],
-            [{ text: '👤 Profile', callback_data: 'open_dashboard' }],
-            [{ text: '❓ Help Desk', url: 'https://t.me/yourSupportBot' }]
-          ]
-        }
+        reply_markup: mainMenuKeyboard()
       });
     }
 
+    // Prompt rating if there’s a completed trip without rating (last 48h)
     try {
       const since = new Date(Date.now() - 48 * 3600 * 1000);
       const lastUnrated = await Ride.findOne({
@@ -283,6 +325,12 @@ function wireRiderHandlers() {
     } catch {}
   });
 
+  // /help or /support from text
+  riderBot.onText(/\/support|^support$|^help$|\/help/i, async (msg) => {
+    const chatId = msg.chat.id;
+    await showSupport(chatId, 'command');
+  });
+
   riderBot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     if (msg.location) {
@@ -293,6 +341,12 @@ function wireRiderHandlers() {
     const state = riderState.get(chatId);
     const text = (msg.text || '').trim();
 
+    // quick support keyword while in any state
+    if (/^support$|^help$/i.test(text)) {
+      await showSupport(chatId, 'keyword');
+      return;
+    }
+
     if (state && state.step) {
       if (state.step === 'awaiting_name' && text) {
         state.name = text;
@@ -301,15 +355,7 @@ function wireRiderHandlers() {
         return riderBot.sendMessage(chatId, '📧 Enter your email address:');
       }
       if (state.step === 'awaiting_email' && text) {
-        state.email = text;
-        state.step = 'awaiting_credit';
-        riderState.set(chatId, state);
-        return riderBot.sendMessage(chatId, '💰 Enter your starting credit (e.g. 100):');
-      }
-      if (state.step === 'awaiting_credit' && text) {
-        const credit = parseFloat(text);
-        if (Number.isNaN(credit)) return riderBot.sendMessage(chatId, '❌ Invalid amount. Enter a number.');
-
+        // Finish registration WITHOUT any credit flow
         const dashboardToken = crypto.randomBytes(24).toString('hex');
         const dashboardPin = Math.floor(1000 + Math.random() * 9000).toString();
         const expiry = new Date(Date.now() + 10 * 60 * 1000);
@@ -318,8 +364,12 @@ function wireRiderHandlers() {
           { chatId },
           {
             $set: {
-              name: state.name, email: state.email, credit,
-              dashboardToken, dashboardPin, dashboardTokenExpiry: expiry, platform: 'telegram'
+              name: state.name,
+              email: text,
+              dashboardToken,
+              dashboardPin,
+              dashboardTokenExpiry: expiry,
+              platform: 'telegram'
             }
           },
           { upsert: true }
@@ -333,14 +383,7 @@ function wireRiderHandlers() {
           `✅ Registration complete!\n\n🔐 Dashboard link:\n${link}\n\n🔢 Your PIN: <b>${dashboardPin}</b>\n⏱️ Expires in 10 mins`,
           {
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🚕 Book Trip', callback_data: 'book_trip' }],
-                [{ text: '💳 Add Credit', callback_data: 'open_dashboard' }],
-                [{ text: '👤 Profile', callback_data: 'open_dashboard' }],
-                [{ text: '❓ Help Desk', url: 'https://t.me/yourSupportBot' }]
-              ]
-            }
+            reply_markup: mainMenuKeyboard()
           }
         );
       }
@@ -383,7 +426,12 @@ function wireRiderHandlers() {
         return;
       }
 
-      /* ======= NEW: pickup/destination via short indices ======= */
+      if (data === 'support') {
+        await showSupport(chatId, 'menu button');
+        return;
+      }
+
+      /* ======= pickup/destination via short indices ======= */
       if (data.startsWith('pick_idx:')) {
         const idx = Number(data.split(':')[1] || -1);
         const st = riderState.get(chatId) || { step: 'awaiting_pickup' };
@@ -559,28 +607,6 @@ function wireRiderHandlers() {
         return;
       }
 
-      if (data.startsWith('pay_cash_')) {
-        const rideId = data.replace('pay_cash_', '');
-        const ride = await Ride.findById(rideId);
-        if (!ride) return;
-
-        ride.paymentMethod = 'cash';
-        ride.paymentStatus = 'paid';
-        ride.paidAt = new Date();
-        ride.status = 'pending';
-        ride.platform = 'telegram';
-        await ride.save();
-
-        const st = riderState.get(chatId);
-        const vehicleType = st?.chosenVehicleType || ride.vehicleType;
-
-        riderEvents.emit('booking:new', { chatId, rideId: String(ride._id), vehicleType });
-
-        await riderBot.sendMessage(chatId, '✅ Cash selected. Requesting your driver now.');
-        riderState.delete(chatId);
-        return;
-      }
-
       // ⭐ rider rates driver
       if (data.startsWith('rate_driver:')) {
         const [, rideId, starsStr] = data.split(':');
@@ -684,7 +710,7 @@ export function initRiderBot({ io, app } = {}) {
   ioRef = io || ioRef;
 
   if (globalThis.__riderBotSingleton.started && riderBot) {
-    console.log('🤖 Rider bot already initialized (singleton)');
+    console.log('🤖 Rider bot already initialized (singleton)'); 
     return riderBot;
   }
 

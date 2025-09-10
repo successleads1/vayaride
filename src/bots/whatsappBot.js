@@ -23,6 +23,11 @@ import Driver from '../models/Driver.js';
 import { riderEvents } from './riderBot.js';
 import { driverEvents } from './driverBot.js';
 import { getAvailableVehicleQuotes } from '../services/pricing.js';
+import {
+  sendAdminEmailToDrivers,
+  sendRiderWelcomeEmail,
+  sendAdminNewRiderAlert
+} from '../services/mailer.js';
 
 /* --------------- paths / env --------------- */
 const __filename = fileURLToPath(import.meta.url);
@@ -38,7 +43,8 @@ const AUTH_DIR = process.env.WA_AUTH_DIR
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-const PUBLIC_URL = process.env.PUBLIC_URL || '';
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
+const SUPPORT_EMAIL = (process.env.SUPPORT_EMAIL || 'admin@vayaride.co.za').trim();
 
 /* ---------- ZA-only parameters ---------- */
 const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || 'country:za';
@@ -56,9 +62,10 @@ let connState = 'disconnected';
 const waNames = new Map(); // jid -> name
 const waRideById = new Map();
 
-// per-JID booking/registration wizard state
+// per-JID wizard state
 // booking: { stage, pickup, destination, quotes, chosenVehicle, price, rideId, suggestions, addrSession }
 // registration: { stage: 'reg_name' | 'reg_email', temp: {name, email} }
+// driverMenu: { stage: 'driver_menu' }
 const convo = new Map();
 
 // rating-await map (jid -> rideId)
@@ -144,18 +151,7 @@ function boostToZA(raw = '') {
 function resetFlow(jid) { convo.set(jid, { stage: 'idle' }); }
 function startBooking(jid) { convo.set(jid, { stage: 'await_pickup' }); }
 function startRegistration(jid) { convo.set(jid, { stage: 'reg_name', temp: {} }); }
-
-function sendMainMenu(jid) {
-  return sendText(
-    jid,
-    `👋 *Welcome to VayaRide!*\n` +
-    `Please reply with a number:\n\n` +
-    `1) 🚕 Book Trip\n` +
-    `2) ❓ Help\n` +
-    `3) 🧑‍💬 Support\n` +
-    `4) 👤 Profile`
-  );
-}
+function startDriverMenu(jid) { convo.set(jid, { stage: 'driver_menu' }); }
 
 /* ---------- persist WA rider profile & location ---------- */
 async function upsertWaRider(jid, { name = null, lastLocation = null } = {}) {
@@ -225,7 +221,7 @@ async function placeDetails(placeId, sessionToken) {
     sessiontoken: sessionToken
   };
   const { data } = await axios.get(url, { params, timeout: 10000 });
-  if (data?.status !== 'OK' || !data?.result?.geometry?.location) return null;
+  if (!data?.result?.geometry?.location) return null;
   const loc = data.result.geometry.location;
   return { lat: Number(loc.lat), lng: Number(loc.lng), address: data.result.formatted_address || data.result.name || '' };
 }
@@ -235,14 +231,24 @@ function formatSuggestionList(sugs) {
   return sugs.map((s, i) => `${i + 1}) ${s.description}`).join('\n');
 }
 
-/* ---------- rideId -> jid resolver ---------- */
-async function getWaJidForRideId(rideId) {
-  const cached = waRideById.get(String(rideId));
-  if (cached) return cached;
+/* ---------- support email trigger ---------- */
+async function triggerSupportEmail({ jid, rider, context = 'WhatsApp support menu' }) {
   try {
-    const r = await Ride.findById(rideId).select('riderWaJid').lean();
-    return r?.riderWaJid || null;
-  } catch { return null; }
+    const subject = 'WhatsApp Support Request — VayaRide';
+    const html =
+      `<p>A user reached the support entry on WhatsApp.</p>
+       <ul>
+         <li><strong>Platform:</strong> WhatsApp</li>
+         <li><strong>JID:</strong> ${jid}</li>
+         <li><strong>Name:</strong> ${rider?.name || '—'}</li>
+         <li><strong>Email:</strong> ${rider?.email || '—'}</li>
+         <li><strong>When:</strong> ${new Date().toLocaleString()}</li>
+         <li><strong>Context:</strong> ${context}</li>
+       </ul>`;
+    await sendAdminEmailToDrivers(SUPPORT_EMAIL, { subject, html });
+  } catch (e) {
+    console.warn('Support email trigger failed:', e?.message || e);
+  }
 }
 
 /* --------------- WA setup --------------- */
@@ -378,17 +384,28 @@ async function handleTextMessage(jid, raw) {
   const state = convo.get(jid) || { stage: 'idle' };
 
   await upsertWaRider(jid).catch(() => {});
-
   const rider = await Rider.findOne({ waJid: jid }).lean().catch(() => null);
   const hasName = !!(rider?.name || waNames.get(jid));
   const hasEmail = !!rider?.email;
 
+  // Driver quick-links
+  if (txt === '/driver' || txt === 'driver') {
+    await sendText(jid, `🧑‍✈️ *Driver Status*\nCheck your status or log in to your dashboard:\n${PUBLIC_URL}/driver`);
+    return;
+  }
+  if (txt === '/driver/register' || txt === 'driver register') {
+    await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
+    return;
+  }
+
+  // First time / greetings → registration flow
   if ((!hasName || !hasEmail) && (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu' || state.stage === 'idle')) {
     startRegistration(jid);
     await sendText(jid, '👋 Welcome! Please enter your *full name* to register:');
     return;
   }
 
+  // Registration flow
   if (state.stage === 'reg_name') {
     const name = raw.trim();
     if (!/^[a-z][a-z\s.'-]{1,}$/i.test(name)) {
@@ -408,14 +425,36 @@ async function handleTextMessage(jid, raw) {
       return;
     }
     const name = state.temp?.name || waNames.get(jid) || 'New Rider';
-    await Rider.findOneAndUpdate({ waJid: jid }, { $set: { name, email, platform: 'whatsapp' } }, { upsert: true });
+
+    // Upsert rider
+    await Rider.findOneAndUpdate(
+      { waJid: jid },
+      { $set: { name, email, platform: 'whatsapp' } },
+      { upsert: true }
+    );
+
+    // Send dashboard link + done
     await sendDashboardLinkWA(jid);
     resetFlow(jid);
     await sendText(jid, `✅ Registration complete, ${name}!`);
+
+    // 🔔 Emails: thank the rider + notify admin
+    try { await sendRiderWelcomeEmail(email, { name }); } catch (e) { console.warn('sendRiderWelcomeEmail failed:', e?.message || e); }
+    try {
+      await sendAdminNewRiderAlert({
+        name,
+        email,
+        platform: 'WhatsApp',
+        createdAt: new Date(),
+        dashboardUrl: `${PUBLIC_URL}/admin/riders`
+      });
+    } catch (e) { console.warn('sendAdminNewRiderAlert failed:', e?.message || e); }
+
     await sendMainMenu(jid);
     return;
   }
 
+  // Ratings quick path
   const pend = ratingAwait.get(jid);
   if (pend && /^[1-5]$/.test(txt)) {
     const stars = Number(txt);
@@ -435,12 +474,14 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
+  // Main menu shortcuts
   if (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu') {
     resetFlow(jid);
     await sendMainMenu(jid);
     return;
   }
 
+  // Idle menu options (including driver option 5)
   if ((state.stage || 'idle') === 'idle') {
     if (txt === '1' || txt === 'book' || txt === 'book trip') {
       startBooking(jid);
@@ -459,13 +500,47 @@ async function handleTextMessage(jid, raw) {
       return;
     }
     if (txt === '3' || txt === 'support') {
-      await sendText(jid, `🧑‍💬 *Support*\nMessage us here or reach our Telegram help desk: https://t.me/yourSupportBot`);
+      await sendText(jid, `🧑‍💼 *Support*\nEmail us at: ${SUPPORT_EMAIL}\nWe’ve also sent a note to our team — they’ll reach out if needed.`);
+      // Trigger support email
+      try {
+        const r = await Rider.findOne({ waJid: jid }).lean().catch(() => null);
+        await triggerSupportEmail({ jid, rider: r, context: 'User selected Support (3)' });
+      } catch {}
       return;
     }
     if (txt === '4' || txt === 'profile' || txt === 'open profile' || txt === 'dashboard' || txt === 'open dashboard') {
       await sendDashboardLinkWA(jid);
       return;
     }
+    if (txt === '5' || txt === 'driver' || txt === 'i am a driver' || txt === 'i’m a driver') {
+      startDriverMenu(jid);
+      await sendText(
+        jid,
+        `🧑‍✈️ *Driver Portal*\n` +
+        `Are you already registered as a driver?\n\n` +
+        `1) No, not registered — show me the registration link\n` +
+        `2) Yes, I’m registered — take me to the dashboard/status`
+      );
+      return;
+    }
+  }
+
+  // Driver sub-menu actions
+  if (state.stage === 'driver_menu') {
+    if (txt === '1' || txt === 'no' || txt === 'not registered') {
+      await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
+      resetFlow(jid);
+      await sendMainMenu(jid);
+      return;
+    }
+    if (txt === '2' || txt === 'yes' || txt === 'i am registered') {
+      await sendText(jid, `🔐 *Driver Dashboard / Status*\nLog in here:\n${PUBLIC_URL}/driver`);
+      resetFlow(jid);
+      await sendMainMenu(jid);
+      return;
+    }
+    await sendText(jid, `Please reply with *1* (register) or *2* (dashboard).`);
+    return;
   }
 
   // PICKUP selection by number
@@ -489,7 +564,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // PICKUP typed → suggestions (allow acronyms & short tokens)
+  // PICKUP typed → suggestions
   if (state.stage === 'await_pickup' && raw.trim().length >= 2) {
     if (!GOOGLE_MAPS_API_KEY) { await sendText(jid, '⚠️ Address search unavailable. Please share your pickup using the 📎 attachment.'); return; }
     try {
@@ -560,7 +635,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // VEHICLE selection (1..N)
+  // VEHICLE selection
   if (state.stage === 'await_vehicle' && /^\d{1,2}$/.test(txt)) {
     const idx = Number(txt) - 1;
     const q = state.quotes?.[idx];
@@ -600,7 +675,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // PAYMENT selection
+  // Payment select
   if (state.stage === 'await_payment') {
     if (txt === '1' || txt === 'cash') {
       const ride = await Ride.findById(state.rideId);
@@ -708,11 +783,28 @@ driverEvents.on('ride:cancelled', async ({ ride }) => {
   try { await sendText(jid, '❌ The driver cancelled the trip. Please try booking again.'); } catch {}
 });
 
-/* ------------ exported WA rating notifier ------------ */
-export async function notifyWhatsAppRiderToRate(ride) {
+/* ------------ rideId resolver ------------ */
+async function getWaJidForRideId(rideId) {
+  const cached = waRideById.get(String(rideId));
+  if (cached) return cached;
   try {
-    const jid = ride?.riderWaJid || (ride?._id ? (await Ride.findById(ride._id).select('riderWaJid').lean())?.riderWaJid : null);
+    const r = await Ride.findById(rideId).select('riderWaJid').lean();
+    return r?.riderWaJid || null;
+  } catch { return null; }
+}
+
+/* ------------ rating: public notifier (EXPORT) ------------ */
+export async function notifyWhatsAppRiderToRate(rideOrId) {
+  try {
+    let ride = rideOrId;
+    if (!ride || !ride._id) {
+      ride = await Ride.findById(rideOrId).lean();
+    }
+    if (!ride || !ride._id) return;
+
+    let jid = ride.riderWaJid || await getWaJidForRideId(ride._id);
     if (!jid) return;
+
     ratingAwait.set(jid, String(ride._id));
     await sendText(
       jid,
@@ -724,6 +816,19 @@ export async function notifyWhatsAppRiderToRate(ride) {
 }
 
 /* ------------ public API ------------ */
+function sendMainMenu(jid) {
+  return sendText(
+    jid,
+    `👋 *Welcome to VayaRide!*\n` +
+    `Please reply with a number:\n\n` +
+    `1) 🚕 Book Trip\n` +
+    `2) ❓ Help\n` +
+    `3) 🧑‍💼 Support\n` +
+    `4) 👤 Profile\n` +
+    `5) 🚗 I am a Driver`
+  );
+}
+
 export function initWhatsappBot() {
   if (sock || initializing) {
     console.log('WhatsApp Bot already initialized');
@@ -760,3 +865,5 @@ export async function resetWhatsAppSession() {
     setupClient();
   }
 }
+
+export { waEvents };

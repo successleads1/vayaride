@@ -1,6 +1,6 @@
 // src/models/Driver.js
 import mongoose from 'mongoose';
-import Ride from './Ride.js'; // needed for stats aggregation / lastTrip
+import Ride from './Ride.js';
 
 /* ---------------- stats subdocs ---------------- */
 const DriverStatsLastTripSchema = new mongoose.Schema({
@@ -18,14 +18,13 @@ const DriverStatsLastTripSchema = new mongoose.Schema({
 }, { _id: false });
 
 const DriverStatsSchema = new mongoose.Schema({
-  totalTrips:      { type: Number, default: 0 },   // completed
-  totalDistanceM:  { type: Number, default: 0 },   // meters
-  totalEarnings:   { type: Number, default: 0 },   // ZAR
+  totalTrips:      { type: Number, default: 0 },
+  totalDistanceM:  { type: Number, default: 0 },
+  totalEarnings:   { type: Number, default: 0 },
   cashCount:       { type: Number, default: 0 },
-  payfastCount:    { type: Number, default: 0 },   // counts 'payfast' or 'app'
+  payfastCount:    { type: Number, default: 0 },
   currency:        { type: String, default: 'ZAR' },
   lastTrip:        { type: DriverStatsLastTripSchema, default: () => ({}) },
-  // ⭐ NEW rating aggregates
   avgRating:       { type: Number, default: 0 },
   ratingsCount:    { type: Number, default: 0 }
 }, { _id: false });
@@ -33,8 +32,12 @@ const DriverStatsSchema = new mongoose.Schema({
 /* ---------------- main driver schema ---------------- */
 const DriverSchema = new mongoose.Schema({
   name: { type: String, required: true },
+
   email: { type: String, index: true, unique: true, sparse: true },
   passwordHash: { type: String },
+
+  // NEW: cellphone (unique, normalized to E.164 like +27xxxxxxxxx)
+  phone: { type: String, index: true, unique: true, sparse: true },
 
   vehicleType: { type: String, enum: ['normal', 'comfort', 'luxury', 'xl'], default: 'normal' },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
@@ -70,31 +73,27 @@ const DriverSchema = new mongoose.Schema({
   stats: { type: DriverStatsSchema, default: () => ({}) }
 }, { timestamps: true });
 
-/* ---------------- static: recompute stats from rides (with ratings) ---------------- */
+/* ---------------- static: recompute stats (with ratings) ---------------- */
 DriverSchema.statics.computeAndUpdateStats = async function (driverId) {
   const driverIdObj = typeof driverId === 'string' ? new mongoose.Types.ObjectId(driverId) : driverId;
 
-  // Aggregate totals & ratings from completed rides
   const [agg] = await Ride.aggregate([
     { $match: { driverId: driverIdObj, status: 'completed' } },
     {
       $group: {
         _id: null,
         trips: { $sum: 1 },
-        // sum of finalDistanceKm (km) → convert to meters later
         distKm: { $sum: { $ifNull: ['$finalDistanceKm', 0] } },
-        // sum of finalAmount (ZAR)
         earn:  { $sum: { $ifNull: ['$finalAmount', 0] } },
         cashCount:    { $sum: { $cond: [{ $eq: ['$paymentMethod', 'cash'] }, 1, 0] } },
         payfastCount: { $sum: { $cond: [{ $in: ['$paymentMethod', ['payfast', 'app']] }, 1, 0] } },
-        ratingSum:    { $sum: { $ifNull: ['$driverRating', 0] } }, // rider → driver
+        ratingSum:    { $sum: { $ifNull: ['$driverRating', 0] } },
         ratingCnt:    { $sum: { $cond: [{ $gt: ['$driverRating', 0] }, 1, 0] } },
         lastTripAt:   { $max: '$completedAt' }
       }
     }
   ]);
 
-  // Find last completed ride details for lastTrip snapshot
   const last = await Ride.findOne({ driverId: driverIdObj, status: 'completed' })
     .sort({ completedAt: -1, updatedAt: -1 })
     .lean();
@@ -102,7 +101,7 @@ DriverSchema.statics.computeAndUpdateStats = async function (driverId) {
   const updates = {};
   if (agg) {
     updates['stats.totalTrips']     = agg.trips || 0;
-    updates['stats.totalDistanceM'] = Math.round((agg.distKm || 0) * 1000); // km → m
+    updates['stats.totalDistanceM'] = Math.round((agg.distKm || 0) * 1000);
     updates['stats.totalEarnings']  = Math.round(agg.earn || 0);
     updates['stats.cashCount']      = agg.cashCount || 0;
     updates['stats.payfastCount']   = agg.payfastCount || 0;
@@ -118,7 +117,6 @@ DriverSchema.statics.computeAndUpdateStats = async function (driverId) {
     updates['stats.ratingsCount']   = 0;
   }
 
-  // Build lastTrip snapshot
   if (last) {
     const distM = Number.isFinite(last.finalDistanceKm)
       ? Math.round(Number(last.finalDistanceKm) * 1000)

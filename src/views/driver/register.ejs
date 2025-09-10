@@ -19,7 +19,7 @@
   <style>
     :root{
       --bg:#000; --card:#111; --text:#fff; --muted:#bbb; --accent:#fff; --border:#222;
-      --overlay:rgba(0,0,0,.64); --card2:#0f0f0f; --card-border:#1a1a1a; --error:#ff6b6b;
+      --overlay:rgba(0,0,0,.64); --card2:#0f0f0f; --card-border:#1a1a1a; --error:#ff6b6b; --ok:#19d27e;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -32,7 +32,7 @@
     /* Top-right quick actions */
     .top-right{
       position:fixed; top:12px; right:12px; display:flex; gap:10px; align-items:center;
-      z-index:5000; /* below modals */
+      z-index:5000;
       transition:opacity .15s ease;
     }
     body.modal-open .top-right{ pointer-events:none; opacity:.35; }
@@ -45,7 +45,7 @@
     .ghost-btn:active{ transform:translateY(1px) }
 
     .card{
-      width:100%; max-width:520px; background:var(--card); border:1px solid var(--border);
+      width:100%; max-width:560px; background:var(--card); border:1px solid var(--border);
       border-radius:12px; padding:28px;
     }
     .logo{display:block;margin:8px auto 16px;width:110px;height:110px;border-radius:50%;border:3px solid #fff;object-fit:cover}
@@ -57,6 +57,10 @@
       width:100%; padding:12px 14px; border-radius:8px;
       border:1px solid var(--border); background:#1a1a1a; color:var(--text)
     }
+    small.help{ display:block; color:var(--muted); margin-top:6px; font-size:12px }
+    .hint-ok{ color:var(--ok) }
+    .hint-err{ color:var(--error) }
+
     button.primary{
       width:100%; margin-top:16px; padding:12px 14px; border-radius:8px;
       border:1px solid var(--accent); background:var(--accent); color:#000; font-weight:700; cursor:pointer
@@ -64,14 +68,14 @@
     button.primary:hover{filter:brightness(0.9)}
     .row{display:flex;justify-content:space-between;gap:12px;margin-top:14px}
     a.link{color:#fff;text-decoration:none;border-bottom:1px dotted #555}
-    .msg{margin:8px 0 0;color:#ff6b6b;text-align:center;min-height:20px}
+    .msg{margin:8px 0 0;color:var(--error);text-align:center;min-height:20px}
     .footer{margin-top:18px;text-align:center;color:var(--muted);font-size:13px}
 
     /* Modal */
     .modal{
       position:fixed; inset:0; display:none;
       align-items:center; justify-content:center; padding:24px;
-      z-index:100000; /* above everything */
+      z-index:100000;
     }
     .modal[open]{ display:flex }
     .modal .backdrop{
@@ -103,7 +107,6 @@
     .qr-wrap{ display:flex; justify-content:center }
     .qr-wrap img{ display:block; background:#fff; border-radius:12px; border:1px solid #2a2a2a }
 
-    /* Toast */
     .toast{
       position:fixed; right:16px; bottom:16px; z-index:100050;
       background:#111; color:#fff; border:1px solid #333; border-radius:12px; padding:12px 14px; font-weight:700;
@@ -134,35 +137,52 @@
       <div class="msg"><%= error %></div>
     <% } %>
 
-    <form method="POST" action="/driver/register" autocomplete="on">
+    <form method="POST" action="/driver/register" autocomplete="on" novalidate id="regForm">
       <label for="name">Full name</label>
       <input id="name" name="name" type="text" required placeholder="Your full name"
+             autocomplete="name"
              value="<%= typeof form !== 'undefined' && form.name ? form.name : '' %>" />
+
+      <!-- NEW: Phone field inserted ABOVE Email -->
+      <label for="phone">Phone (South Africa)</label>
+      <input id="phone"
+             name="phone"
+             type="tel"
+             required
+             inputmode="tel"
+             placeholder="071 234 5678"
+             value="<%= typeof form !== 'undefined' && form.phone ? form.phone : '' %>" />
 
       <label for="email">Email</label>
       <input id="email" name="email" type="email" required placeholder="you@example.com"
+             autocomplete="email"
              value="<%= typeof form !== 'undefined' && form.email ? form.email : '' %>" />
 
       <div style="display:flex; gap:12px;">
         <div style="flex:1">
           <label for="password">Password</label>
-          <input id="password" name="password" type="password" required placeholder="********" />
+          <input id="password" name="password" type="password" required placeholder="********"
+                 autocomplete="new-password"
+                 pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,}"
+                 title="Min 8 chars, include upper, lower, number and special, no spaces" />
+          <small id="pwHint" class="help">Min 8 chars with upper, lower, number &amp; special. No spaces.</small>
         </div>
         <div style="flex:1">
           <label for="confirm">Confirm Password</label>
-          <input id="confirm" name="confirm" type="password" required placeholder="********" />
+          <input id="confirm" name="confirm" type="password" required placeholder="********" autocomplete="new-password" />
+          <small id="matchHint" class="help"></small>
         </div>
       </div>
 
       <label for="vehicleType">Vehicle Type (you can change later)</label>
       <select id="vehicleType" name="vehicleType" required>
-        <option value="normal">VayaRide • Normal</option>
-        <option value="comfort">VayaRide • Comfort</option>
-        <option value="luxury">VayaRide • Luxury</option>
-        <option value="xl">VayaRide • XL</option>
+        <option value="normal" <%= form && form.vehicleType==='normal' ? 'selected' : '' %>>VayaRide • Normal</option>
+        <option value="comfort" <%= form && form.vehicleType==='comfort' ? 'selected' : '' %>>VayaRide • Comfort</option>
+        <option value="luxury" <%= form && form.vehicleType==='luxury' ? 'selected' : '' %>>VayaRide • Luxury</option>
+        <option value="xl" <%= form && form.vehicleType==='xl' ? 'selected' : '' %>>VayaRide • XL</option>
       </select>
 
-      <button class="primary" type="submit">Create account</button>
+      <button class="primary" type="submit" id="btnSubmit">Create account</button>
     </form>
 
     <div class="row">
@@ -208,7 +228,7 @@
   <div class="toast" id="toast" role="status" aria-live="polite">Done</div>
 
   <script>
-    /* ---------- Modal manager (adds/removes body.modal-open) ---------- */
+    /* ---------- Modal manager ---------- */
     (function(){
       function getFocusable(container){
         return Array.from(container.querySelectorAll(
@@ -223,7 +243,6 @@
         document.body.style.overflow = 'hidden';
         document.body.classList.add('modal-open');
         setTimeout(()=> dialog?.focus(), 0);
-
         modal.dispatchEvent(new CustomEvent('modal:open'));
         function onKeydown(e){
           if (e.key === 'Escape'){ e.preventDefault(); closeModal(modal); }
@@ -288,13 +307,11 @@
       function driverRegisterUrl(){
         const base = (window.__PUBLIC_URL__ || '').replace(/\/$/, '');
         if (base) return base + '/driver/register';
-        // fallback for dev / tunnels
         try { return window.location.origin.replace(/\/$/, '') + '/driver/register'; }
         catch { return 'https://vayaride.com/driver/register'; }
       }
 
       function buildQrSrc(){
-        // Prefer relative path so server composes it with PUBLIC_URL
         const base = (window.__PUBLIC_URL__ || '').replace(/\/$/, '');
         const param = base ? '/driver/register' : driverRegisterUrl();
         return '/qr.png?u=' + encodeURIComponent(param);
@@ -303,7 +320,6 @@
       function openPrintWindow(imgSrc){
         const w = window.open('', '_blank', 'noopener,noreferrer,width=720,height=900');
         if (!w) return;
-        // Simple printable page
         w.document.write(`<!doctype html><html><head>
           <meta charset="utf-8" />
           <title>VayaRide — Driver Registration QR</title>
@@ -347,16 +363,49 @@
         openPrintWindow(qrImg.src);
       });
 
-      // Fill controls on open
       modal.addEventListener('modal:open', ()=>{
         const pageUrl = driverRegisterUrl();
         urlInput.value = pageUrl;
-
         const src = buildQrSrc();
         qrImg.src = src;
-
-        // download href
         btnDownload.href = src;
+      });
+    })();
+
+    /* ---------- Client-side password match + quick hints ---------- */
+    (function(){
+      const pw = document.getElementById('password');
+      const cf = document.getElementById('confirm');
+      const matchHint = document.getElementById('matchHint');
+      const pwHint = document.getElementById('pwHint');
+      const form = document.getElementById('regForm');
+
+      function checkMatch(){
+        if (!cf.value) { cf.setCustomValidity(''); matchHint.textContent=''; return; }
+        if (pw.value !== cf.value){
+          cf.setCustomValidity('Passwords do not match');
+          matchHint.textContent = 'Passwords do not match';
+          matchHint.className = 'help hint-err';
+        } else {
+          cf.setCustomValidity('');
+          matchHint.textContent = 'Looks good';
+          matchHint.className = 'help hint-ok';
+        }
+      }
+
+      pw.addEventListener('input', ()=>{ checkMatch(); });
+      cf.addEventListener('input', checkMatch);
+
+      form.addEventListener('submit', (e)=>{
+        if (!form.checkValidity()){
+          e.preventDefault();
+          if (pw.validity.patternMismatch){
+            pwHint.className = 'help hint-err';
+          } else {
+            pwHint.className = 'help';
+          }
+          checkMatch();
+        }
       });
     })();
   </script>

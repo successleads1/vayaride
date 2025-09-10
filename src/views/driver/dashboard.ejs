@@ -64,7 +64,7 @@
     label{font-size:14px;margin:10px 0 6px;display:block}
     input,select{
       width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);
-      background:#1a1a1a;color:#fff;font-size:16px; /* comfortable tap size */
+      background:#1a1a1a;color:#fff;font-size:16px;
     }
     input[type=file]{padding:10px;background:#111}
     .hint{font-size:12px;color:#aaa;margin-top:4px}
@@ -95,7 +95,7 @@
     .empty{color:#999}
     .doc-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 
-    /* ---------- Docs table: mobile transforms to cards ---------- */
+    /* ---------- Docs table: mobile -> cards ---------- */
     @media (max-width: 700px){
       table.docs thead{display:none}
       table.docs, table.docs tbody, table.docs tr, table.docs td{display:block;width:100%}
@@ -114,27 +114,70 @@
       .doc-actions{width:100%;justify-content:flex-end;gap:8px}
     }
 
-    /* Header responsiveness enhancements */
+    /* Header responsiveness */
     @media (max-width: 700px){
       header{flex-wrap:wrap;padding:10px 12px}
       .actions{width:100%;justify-content:flex-start}
       .actions form{display:inline}
     }
 
-    /* Make images/iframes inside content responsive */
     img, video{max-width:100%;height:auto}
-
-    /* Improve focus/keyboard */
     a, button, input, select{outline-color:var(--accent)}
 
-    /* Safe area for notches */
     @supports (padding:max(0px)){
       header{padding-left:max(12px, env(safe-area-inset-left)); padding-right:max(12px, env(safe-area-inset-right));}
       main{padding-left:max(16px, env(safe-area-inset-left)); padding-right:max(16px, env(safe-area-inset-right));}
     }
+
+    /* ===== Modal (missing docs) ===== */
+    .modal{
+      position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+      background:rgba(0,0,0,.64); z-index:10000; padding:20px;
+    }
+    .modal[open]{ display:flex }
+    .modal .dialog{
+      width:min(560px,96vw); background:var(--card); color:#fff; border:1px solid var(--border);
+      border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,.55);
+      transform:translateY(6px) scale(.98); opacity:0; transition:.18s ease;
+    }
+    .modal[open] .dialog{ transform:translateY(0) scale(1); opacity:1; }
+    .dialog .hd{ display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border) }
+    .dialog h3{ margin:0; font-size:18px }
+    .dialog .bd{ padding:14px 16px; font-size:15px; color:#e9e9e9 }
+    .dialog .ft{ display:flex; gap:10px; justify-content:flex-end; padding:14px 16px; border-top:1px solid var(--border) }
+    .x{ background:#111; color:#fff; border:1px solid #333; width:34px; height:34px; border-radius:10px; cursor:pointer; font-size:18px; line-height:0 }
+    .btn-light{ background:#fff; color:#000; border:1px solid #fff; border-radius:10px; padding:10px 14px; font-weight:800; cursor:pointer }
+    .btn-ghost{ background:transparent; color:#fff; border:1px solid #444; border-radius:10px; padding:10px 14px; cursor:pointer }
+    .miss-list{margin:10px 0 0; padding-left:20px;}
+    .miss-list li{margin:4px 0}
   </style>
 </head>
-<body>
+
+<% 
+  // Server-side helpers for modal
+  const docs = (user && user.documents) || {};
+  const requiredKeys = [
+    'driverProfilePhoto','vehiclePhoto','idDocument','vehicleRegistration',
+    'driversLicense','insuranceCertificate','pdpOrPsv','dekraCertificate',
+    'policeClearance','licenseDisc'
+  ];
+  const labelMap = {
+    driverProfilePhoto:'Driver Profile Photo',
+    vehiclePhoto:'Vehicle Photo',
+    idDocument:'National ID',
+    vehicleRegistration:'Vehicle Registration',
+    driversLicense:'Driver’s License',
+    insuranceCertificate:'Insurance Certificate',
+    pdpOrPsv:'PDP / PSV',
+    dekraCertificate:'DEKRA Certificate',
+    policeClearance:'Police Clearance',
+    licenseDisc:'License Disc'
+  };
+  const missing = requiredKeys.filter(k => !docs[k]);
+  const firstMissing = missing[0] || '';
+%>
+
+<body data-missing="<%= missing.length %>">
   <header>
     <div class="brand">
       <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide" />
@@ -198,7 +241,8 @@
     <!-- Documents on file -->
     <section class="card" id="docs" style="grid-column: 1 / -1;">
       <h2>Documents on File</h2>
-      <% const docs = (user && user.documents) || {}; %>
+      <% /* expose to table */ %>
+      <% const tableDocs = docs; %>
       <table class="docs">
         <thead>
           <tr>
@@ -223,7 +267,7 @@
           ]; %>
 
           <% rows.forEach(([key,label]) => {
-               const url = docs[key];
+               const url = tableDocs[key];
                const isImg = url && /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(url);
                const isPdf = url && /\.pdf(\?|$)/i.test(url);
           %>
@@ -307,31 +351,39 @@
       </form>
       <p class="note">By uploading, you agree your documents will be stored securely and reviewed by VayaRide admins.</p>
     </section>
-
-    <!-- Vehicle Setup -->
-    <section class="card">
-      <h2>Vehicle Setup (Optional)</h2>
-      <form action="/driver/vehicle" method="POST">
-        <label for="vehicleType">Vehicle Type</label>
-        <select id="vehicleType" name="vehicleType" required>
-          <option value="normal" <%= (user && user.vehicleType==='normal') ? 'selected':'' %>>VayaRide • Normal</option>
-          <option value="comfort" <%= (user && user.vehicleType==='comfort') ? 'selected':'' %>>VayaRide • Comfort</option>
-          <option value="luxury" <%= (user && user.vehicleType==='luxury') ? 'selected':'' %>>VayaRide • Luxury</option>
-          <option value="xl" <%= (user && user.vehicleType==='xl') ? 'selected':'' %>>VayaRide • XL</option>
-        </select>
-
-        <button class="primary" type="submit">Save Vehicle</button>
-      </form>
-      <p class="note">Your car category helps us estimate prices correctly for riders.</p>
-    </section>
   </main>
+
+  <!-- ===== Missing Docs Modal ===== -->
+  <div class="modal" id="missing-docs-modal" aria-hidden="true">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="missTitle" aria-describedby="missDesc" tabindex="-1">
+      <div class="hd">
+        <h3 id="missTitle">Complete your driver application</h3>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="missDesc">
+        <p>You still need to upload the following document(s):</p>
+        <ul class="miss-list">
+          <% if (missing.length) { missing.forEach(k => { %>
+            <li><%= labelMap[k] %></li>
+          <% }) } else { %>
+            <li>All set 🎉</li>
+          <% } %>
+        </ul>
+        <p class="note" style="margin-top:10px">Uploading now speeds up approval.</p>
+      </div>
+      <div class="ft">
+        <button class="btn-ghost" type="button" data-dismiss>Remind me later</button>
+        <button class="btn-light" type="button" id="goUploadBtn">Upload documents</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     // ---- Client-side image compression + size display ----
     const MAX_UPLOAD = 10 * 1024 * 1024; // 10MB
-    const TARGET_MAX_W = 1800;           // px
-    const TARGET_MAX_H = 1800;           // px
-    const JPEG_QUALITY = 0.72;           // 0..1
+    const TARGET_MAX_W = 1800;
+    const TARGET_MAX_H = 1800;
+    const JPEG_QUALITY = 0.72;
 
     function fmtMB(bytes){ return (bytes/1024/1024).toFixed(2) + 'MB'; }
 
@@ -379,7 +431,7 @@
             setSizeTag(input);
           }
         } else {
-          setSizeTag(input); // PDFs or others: just display size
+          setSizeTag(input);
         }
       });
     });
@@ -396,6 +448,54 @@
         }
       }
       return true;
+    });
+
+    // ===== Modal helpers =====
+    function openModal(el){
+      const modal = typeof el === 'string' ? document.getElementById(el) : el;
+      if (!modal) return;
+      modal.setAttribute('open','');
+      modal.setAttribute('aria-hidden','false');
+      document.body.style.overflow = 'hidden';
+      function onClick(e){
+        if (e.target.dataset.dismiss !== undefined || e.target.classList.contains('modal')){
+          closeModal(modal);
+        }
+      }
+      modal._dismiss = onClick;
+      modal.addEventListener('click', onClick);
+    }
+    function closeModal(modal){
+      modal.removeAttribute('open');
+      modal.setAttribute('aria-hidden','true');
+      document.body.style.overflow = '';
+      modal.removeEventListener('click', modal._dismiss);
+    }
+    document.querySelectorAll('[data-dismiss]').forEach(btn=> btn.addEventListener('click', e=>{
+      const modal = e.target.closest('.modal');
+      if (modal) closeModal(modal);
+    }));
+
+    // ===== Auto-show missing docs modal on load (if any missing) =====
+    document.addEventListener('DOMContentLoaded', ()=>{
+      const missingCount = Number(document.body.dataset.missing || 0);
+      if (missingCount > 0){
+        openModal('missing-docs-modal');
+      }
+      // Upload CTA scrolls to the form and focuses the first missing field (if we can)
+      const goBtn = document.getElementById('goUploadBtn');
+      goBtn?.addEventListener('click', ()=>{
+        closeModal(document.getElementById('missing-docs-modal'));
+        const form = document.getElementById('docsForm');
+        form?.scrollIntoView({ behavior:'smooth', block:'start' });
+
+        // Focus the first missing input if we can (server injected id below)
+        const firstMissingKey = "<%= firstMissing %>";
+        if (firstMissingKey){
+          const input = form?.querySelector(`input[name="${firstMissingKey}"]`);
+          setTimeout(()=> input?.focus(), 450);
+        }
+      });
     });
   </script>
 </body>
