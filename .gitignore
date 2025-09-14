@@ -36,3 +36,5 @@ public/uploads/
 
 # Generated WhatsApp QR
 public/wa-qr.png
+# WhatsApp Baileys driver sessions
+baileys_auth_driver/

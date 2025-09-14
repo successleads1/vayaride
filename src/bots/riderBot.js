@@ -228,7 +228,6 @@ async function showSupport(chatId, context = 'menu') {
     `🧑‍💼 <b>Support</b>\n` +
     `If you’re having issues:\n\n` +
     `• Email: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>\n` +
-    
     `We’re here to help.`;
   await riderBot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
   // Notify admin team
@@ -503,65 +502,11 @@ function wireRiderHandlers() {
         await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
         return;
       }
-      /* ======= END new index handlers ======= */
+      /* ======= END index handlers ======= */
 
-      // Back-compat: old long payloads (safe to keep)
-      if (data.startsWith('pick_place:')) {
-        const placeId = data.split(':')[1];
-        const st = riderState.get(chatId) || { step: 'awaiting_pickup' };
-        const loc = await gmapsPlaceLatLng(placeId, { sessiontoken: st.gmapsSession });
-        if (!loc) {
-          await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
-          return askPickup(chatId);
-        }
-        st.pickup = { lat: loc.lat, lng: loc.lng };
-        st.step = 'awaiting_drop';
-        riderState.set(chatId, st);
-        await riderBot.sendMessage(chatId, `✅ Pickup set to: ${loc.address || `(${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)})`}`);
-        return askDrop(chatId);
-      }
-
-      if (data.startsWith('drop_place:')) {
-        const placeId = data.split(':')[1];
-        const st = riderState.get(chatId);
-        if (!st || !st.pickup) {
-          riderState.set(chatId, { step: 'awaiting_pickup' });
-          await riderBot.sendMessage(chatId, '⚠️ Session expired. Please set pickup again.');
-          return askPickup(chatId);
-        }
-        const loc = await gmapsPlaceLatLng(placeId, { sessiontoken: st.gmapsSession });
-        if (!loc) {
-          await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
-          return askDrop(chatId);
-        }
-
-        st.destination = { lat: loc.lat, lng: loc.lng };
-        st.step = 'selecting_vehicle';
-        riderState.set(chatId, st);
-
-        let quotes = [];
-        try {
-          quotes = await getAvailableVehicleQuotes({
-            pickup: st.pickup,
-            destination: st.destination,
-            radiusKm: 30
-          });
-        } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
-
-        if (!quotes.length) {
-          st.step = 'awaiting_pickup';
-          riderState.set(chatId, st);
-          await riderBot.sendMessage(chatId, '😞 No drivers are currently available nearby. Please try again.');
-          return askPickup(chatId);
-        }
-
-        const toLabel = (vt) => vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
-        const keyboard = quotes.map((q) => ([{ text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }]));
-        st.dynamicQuotes = quotes;
-        riderState.set(chatId, st);
-
-        await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
-        return;
+      // Back-compat: old long payloads (keep)
+      if (data.startsWith('pick_place:') || data.startsWith('drop_place:')) {
+        // deprecated in your current flow; ignored
       }
 
       if (data.startsWith('veh:')) {
@@ -581,7 +526,7 @@ function wireRiderHandlers() {
           destination: st.destination,
           estimate: price,
           vehicleType,
-          status: 'payment_pending',
+          status: 'payment_pending',     // will flip on cash or PayFast ITN
           paymentMethod: 'payfast',
           platform: 'telegram'
         });
@@ -603,6 +548,43 @@ function wireRiderHandlers() {
           chosenVehicleType: vehicleType,
           rideId: String(ride._id)
         });
+
+        return;
+      }
+
+      // ─────────────────────────────────────────────────────────
+      // 💵 CASH chosen → confirm & dispatch the ride immediately
+      // ─────────────────────────────────────────────────────────
+      if (data.startsWith('pay_cash_')) {
+        const rideId = data.replace('pay_cash_', '');
+        const ride = await Ride.findById(rideId);
+        if (!ride) {
+          try { await riderBot.answerCallbackQuery(query.id, { text: 'Ride not found' }); } catch {}
+          await riderBot.sendMessage(chatId, '❌ Sorry, that ride could not be found.');
+          return;
+        }
+
+        // Only allow if this chat created the ride
+        if (String(ride.riderChatId) !== String(chatId)) {
+          try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your ride' }); } catch {}
+          return;
+        }
+
+        // Flip to pending so the dispatcher picks it up
+        ride.paymentMethod = 'cash';
+        ride.status = 'pending';
+        await ride.save();
+
+        // Ack to user
+        try { await riderBot.answerCallbackQuery(query.id, { text: 'Cash selected' }); } catch {}
+        await riderBot.sendMessage(
+          chatId,
+          '💵 Payment set to *Cash*.\nWe\'re finding you the nearest driver…',
+          { parse_mode: 'Markdown' }
+        );
+
+        // 🔔 Trigger the dispatcher
+        try { riderEvents.emit('booking:new', { rideId: String(ride._id) }); } catch {}
 
         return;
       }
