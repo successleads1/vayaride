@@ -1,950 +1,689 @@
-// server.js
-import 'dotenv/config';
-import express from 'express';
-import http from 'http';
-import path from 'path';
+// src/bots/whatsappDriverBot.js
+// WhatsApp bot dedicated to DRIVERS (separate Baileys session from rider WA bot)
+
+import makeWASocket, {
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  DisconnectReason,
+  delay
+} from '@whiskeysockets/baileys';
+
 import fs from 'fs';
-import mongoose from 'mongoose';
-import { Server as SocketIO } from 'socket.io';
+import path from 'path';
 import { fileURLToPath } from 'url';
-import morgan from 'morgan';
-import session from 'express-session';
-import bcrypt from 'bcrypt';
-import QRCode from 'qrcode';
+import pino from 'pino';
+import qrcode from 'qrcode';
+import EventEmitter from 'events';
 
-/* ---- Auth & Routers ---- */
-import passport from './src/auth/passport.js';
-import driverAuthRouter from './src/routes/driverAuth.js';
-import adminRouter from './src/routes/admin.js';
+import Driver from '../models/Driver.js';
+import Ride from '../models/Ride.js';
+import { driverEvents } from './driverBot.js'; // reuse same event bus as TG bot
 
-/* ---- Models ---- */
-import Ride from './src/models/Ride.js';
-import Driver from './src/models/Driver.js';
-import Rider from './src/models/Rider.js';
-import Admin from './src/models/Admin.js';
-import Activity from './src/models/Activity.js';
-
-/* ---- App routes ---- */
-import finishRouter from './src/routes/finish.js';
-import payfastNotifyRouter from './src/routes/payfastNotify.js';
-import partnerRouter from './src/routes/partner.js';
-import payfastRouter from './src/routes/payfast.js';
-import payfastGatewayRouter from './src/routes/payfastGateway.js';
-
-/* ---- Bots (Telegram) ---- */
-import { initRiderBot, riderEvents, riderBot as RB } from './src/bots/riderBot.js';
-import { initDriverBot, driverEvents, driverBot as DB } from './src/bots/driverBot.js';
-
-/* ---- Bots (WhatsApp: Riders) ---- */
-import {
-  initWhatsappBot,
-  waitForQrDataUrl,
-  isWhatsAppConnected,
-  getConnectionStatus,
-  sendWhatsAppMessage,
-  resetWhatsAppSession,
-  notifyWhatsAppRiderToRate
-} from './src/bots/whatsappBot.js';
-
-/* ---- Bots (WhatsApp: Drivers) ---- */
-import {
-  initWhatsappDriverBot,
-  waitForDriverQrDataUrl,
-  isWhatsAppDriverConnected,
-  getDriverConnectionStatus,
-  resetWhatsAppDriverSession,
-  waNotifyDriverNewRequest,
-  sendWhatsAppDriverMessage
-} from './src/bots/whatsappDriverBot.js';
-
-/* ---- Services ---- */
-import { assignNearestDriver, setEstimateOnRide, hasNumericChatId } from './src/services/assignment.js';
-
+/* -------------------- env & paths -------------------- */
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname  = path.dirname(__filename);
+const ROOT_DIR   = path.resolve(process.cwd());
 
-const app = express();
-const server = http.createServer(app);
-const io = new SocketIO(server, { cors: { origin: '*' } });
-app.set('io', io);
-app.set('trust proxy', 1);
-const PORT = process.env.PORT || 3000;
-const TRACK_LINK_TTL_HOURS = Number(process.env.TRACK_LINK_TTL_HOURS || 24);
+// Default PUBLIC_URL for dev so links work without env
+const PUBLIC_URL = (process.env.PUBLIC_URL || 'http://localhost:3000').trim().replace(/\/$/, '');
 
-/* ---------------- Mongo ---------------- */
-await mongoose.connect(process.env.MONGODB_URI);
-console.log('✅ MongoDB connected');
+// Use a separate auth folder so this session is completely independent
+const AUTH_DIR = process.env.WA_DRIVER_AUTH_DIR
+  ? path.resolve(process.env.WA_DRIVER_AUTH_DIR)
+  : path.resolve(ROOT_DIR, 'baileys_auth_driver');
 
-/* ---------------- App setup ---------------- */
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'src/views'));
-app.use(morgan('dev'));
-app.use(express.static(path.join(__dirname, 'public'))); // serves /wa-qr.png and /track.html
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-/* ---------------- Simple QR helper ---------------- */
-// GET /qr.png            -> QR for PUBLIC_URL
-// GET /qr.png?u=/promo   -> QR for PUBLIC_URL + "/promo"
-// GET /qr.png?u=https://vayaride.com/anything (same-domain only)
-app.get('/qr.png', async (req, res) => {
-  try {
-    const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-    let target = base;
-    const u = req.query.u;
+const logger = pino({ level: process.env.WA_DRIVER_LOG_LEVEL || 'warn' });
 
-    if (typeof u === 'string' && u.startsWith('/')) target = base + u;
-    if (typeof u === 'string' && /^https?:\/\//i.test(u)) {
-      try {
-        const parsed = new URL(u);
-        if (parsed.hostname.endsWith('vayaride.com')) target = parsed.toString();
-      } catch {}
-    }
+/* -------------------- state -------------------- */
+let sock = null;
+let initializing = false;
+let currentQR = null;
+let connState = 'disconnected';
 
-    res.type('png');
-    await QRCode.toFileStream(res, target, { width: 220, margin: 1 });
-  } catch {
-    res.status(500).send('QR error');
+const driverNames = new Map(); // jid -> name (cached displayName)
+const recentSends = new Map(); // dedupe "same message spam"
+const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
+
+// Track pending ride per-driver so they can just reply ACCEPT/IGNORE
+const pendingRideByJid = new Map();      // jid -> full rideId
+const pendingShortByJid = new Map();     // jid -> short 4-char -> full rideId
+
+// Exported so server/UI can wait for QR in browser
+export const driverWaEvents = new EventEmitter();
+
+/* -------------------- tiny helpers -------------------- */
+function normText(s = '') { return String(s).trim().replace(/\s+/g, ' '); }
+function shouldSendOnce(jid, text) {
+  const key = `${jid}|${normText(text)}`;
+  const now = Date.now();
+  const last = recentSends.get(key) || 0;
+  if (now - last < DEDUPE_TTL_MS) return false;
+  recentSends.set(key, now);
+  if (recentSends.size > 2000) {
+    const cutoff = now - 2 * DEDUPE_TTL_MS;
+    for (const [k, ts] of recentSends) if (ts < cutoff) recentSends.delete(k);
   }
-});
+  return true;
+}
 
-/* ---------------- Routes that need bodies first ---------------- */
-app.use('/api/payfast', payfastNotifyRouter);   // /api/payfast/notify (ITN)
-app.use('/api/payfast', payfastGatewayRouter);  // /api/payfast/gateway (auto-post to PayFast)
-app.use('/api/partner', partnerRouter);         // /api/partner/upgrade/payfast (landing page)
-app.use('/pay', payfastRouter);                 // /pay/:rideId → redirect to landing
-app.use(finishRouter);
+function isJid(str) {
+  return /@(s\.whatsapp\.net|g\.us|broadcast)$/.test(String(str || ''));
+}
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || 'devsecret',
-    resave: false,
-    saveUninitialized: false,
-    cookie: { maxAge: 12 * 60 * 60 * 1000 },
-  })
-);
-app.use(passport.initialize());
-app.use(passport.session());
-app.use((req, res, next) => { res.locals.user = req.user || null; next(); });
+function jidFromPhone(phoneLike) {
+  // accepts +27..., 27..., 0... (ZA); returns 27xxxxxxxxx@s.whatsapp.net
+  const raw = String(phoneLike || '').trim();
+  if (!raw) return null;
+  let digits = raw.replace(/[^\d]/g, '');
+  if (digits.startsWith('0')) {
+    // ZA local → assume +27
+    digits = '27' + digits.slice(1);
+  }
+  if (!/^\d{8,15}$/.test(digits)) return null;
+  return `${digits}@s.whatsapp.net`;
+}
 
-/* ---------------- Seed Admin (optional) ---------------- */
-async function ensureSeedAdmin() {
-  const { ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_NAME } = process.env;
-  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-    console.warn('⚠️ Skipping admin seed: ADMIN_EMAIL/ADMIN_PASSWORD not set');
+function phoneFromJid(jid) {
+  // '27xxxxxxxxx@s.whatsapp.net' -> +27xxxxxxxxx
+  const m = String(jid || '').match(/^(\d+)@s\.whatsapp\.net$/);
+  if (!m) return null;
+  return `+${m[1]}`;
+}
+
+async function sendText(jidOrPhone, text) {
+  if (!sock) throw new Error('WA driver client not ready');
+  let jid = null;
+
+  if (isJid(jidOrPhone)) {
+    jid = String(jidOrPhone);
+  } else {
+    jid = jidFromPhone(jidOrPhone);
+  }
+
+  if (!jid) {
+    // Don’t throw here; just log to avoid recursive error handling loops
+    logger.warn('[WA-DRIVER] sendText skipped (invalid JID/phone): %s', jidOrPhone);
     return;
   }
-  const existing = await Admin.findOne({ email: ADMIN_EMAIL });
-  if (existing) return;
-  const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
-  await Admin.create({ name: ADMIN_NAME || 'Super Admin', email: ADMIN_EMAIL, passwordHash });
-  console.log('🛡️ Seeded admin:', ADMIN_EMAIL);
+  if (!shouldSendOnce(jid, text)) return;
+  await sock.sendMessage(jid, { text });
 }
-await ensureSeedAdmin();
 
-/* ---------------- Init Bots (AFTER middleware) ---------------- */
-initWhatsappBot();            // WA for Riders (existing)
-initWhatsappDriverBot();      // WA for Drivers (new)
+async function sendButtons(jid, body, rideId) {
+  // Use old-style buttons (still widely supported). If they fail, caller should fallback to text.
+  const buttonsMessage = {
+    text: body,
+    buttons: [
+      { buttonId: `accept_${rideId}`, buttonText: { displayText: '✅ Accept' }, type: 1 },
+      { buttonId: `ignore_${rideId}`, buttonText: { displayText: '🙈 Ignore' }, type: 1 },
+    ],
+    headerType: 1
+  };
+  await sock.sendMessage(jid, buttonsMessage);
+}
 
-const riderBot = initRiderBot(io);
-const driverBot = initDriverBot(io);
-console.log('🤖 Rider bot initialized');
-console.log('🚗 Driver bot initialized');
+function onlineKeyboardText(isOnline) {
+  return isOnline
+    ? '🔴 Reply *OFFLINE* to stop receiving jobs.'
+    : '🟢 Reply *ONLINE* to start receiving jobs.';
+}
 
-/* ---------------- Helper: log + broadcast to admin ---------------- */
-async function logActivity({ rideId, type, message, actorType = 'system', actorId = null, meta = {} }) {
-  try {
-    const a = await Activity.create({ rideId, type, message, actorType, actorId, meta });
-    io.emit('admin:activity', {
-      _id: String(a._id),
-      rideId: String(rideId),
-      type,
-      message,
-      actorType,
-      actorId,
-      createdAt: a.createdAt,
-      meta
-    });
-  } catch (e) {
-    console.warn('logActivity failed:', e?.message || e);
+function fmtKm(meters) { return `${(Number(meters || 0) / 1000).toFixed(2)} km`; }
+function fmtDuration(sec) {
+  const s = Number(sec || 0);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h) return `${h}h ${m}m`; if (m) return `${m}m ${r}s`; return `${r}s`;
+}
+function fmtAmount(n) { return `R${Number(n || 0).toFixed(0)}`; }
+function paymentEmoji(method) {
+  if (method === 'cash') return '💵';
+  if (method === 'payfast' || method === 'app') return '💳';
+  return '✅';
+}
+
+/* -------------------- DB helpers -------------------- */
+async function setAvailabilityByJid(jid, isOnline) {
+  // Find driver by phone match (recommended)
+  const phone = phoneFromJid(jid);
+  let driver = null;
+
+  if (phone) {
+    driver = await Driver.findOneAndUpdate(
+      { phone: phone }, // phone normalized to +27...
+      { $set: { isAvailable: !!isOnline, lastSeenAt: new Date() } },
+      { new: true }
+    );
+  }
+
+  return driver;
+}
+
+async function findDriverByJid(jid) {
+  const phone = phoneFromJid(jid);
+  if (!phone) return null;
+  return Driver.findOne({ phone }).lean();
+}
+
+async function linkDriverByEmail(email, jid) {
+  // convenience: LINK email@example.com to bind their WhatsApp number to their driver record, if missing
+  const phone = phoneFromJid(jid);
+  if (!phone) return null;
+
+  const emailRegex = new RegExp(`^${String(email).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+  const driver = await Driver.findOneAndUpdate(
+    { email: emailRegex },
+    { $set: { phone, lastSeenAt: new Date() } },
+    { new: true }
+  );
+  return driver;
+}
+
+async function ensureAndGetDriverStats(driver) {
+  try { await Driver.computeAndUpdateStats(driver._id); } catch {}
+  return Driver.findById(driver._id);
+}
+
+function formatStatsMessage(driver) {
+  const s = driver?.stats || {}; const last = s.lastTrip || {};
+  const lines = [];
+  lines.push('📊 *Your Stats*');
+  lines.push(`• Trips: *${s.totalTrips || 0}*`);
+  lines.push(`• Distance: *${fmtKm(s.totalDistanceM || 0)}*`);
+  lines.push(`• Earnings: *${fmtAmount(s.totalEarnings || 0)}*`);
+  lines.push(`• Payments: ${s.cashCount || 0} cash · ${s.payfastCount || 0} payfast`);
+  if (typeof s.avgRating === 'number' && s.ratingsCount >= 0) {
+    lines.push(`• Rating: *${(s.avgRating || 0).toFixed(2)}* (${s.ratingsCount || 0})`);
+  }
+  if (last && last.rideId) {
+    lines.push('');
+    lines.push('🧾 *Last Trip*');
+    lines.push(`• Distance: *${fmtKm(last.distanceMeters || 0)}*`);
+    lines.push(`• Duration: *${fmtDuration(last.durationSec || 0)}*`);
+    lines.push(`• Amount: *${fmtAmount(last.amount || 0)}* ${paymentEmoji(last.method)}`);
+  }
+  return lines.join('\n');
+}
+
+/* -------------------- helpers for pending rides -------------------- */
+function setPendingFor(jid, rideId) {
+  pendingRideByJid.set(jid, rideId);
+  const short = String(rideId).slice(-4).toLowerCase();
+  const map = pendingShortByJid.get(jid) || new Map();
+  map.set(short, rideId);
+  // Keep only last ~10 shorts per jid
+  if (map.size > 10) {
+    const firstKey = map.keys().next().value;
+    map.delete(firstKey);
+  }
+  pendingShortByJid.set(jid, map);
+}
+
+function resolveRideIdFromInput(jid, maybeCode) {
+  if (!maybeCode) return pendingRideByJid.get(jid) || null;
+  const code = String(maybeCode).trim().toLowerCase();
+  if (/^[a-f0-9]{24}$/.test(code)) return code;
+  if (/^[a-f0-9]{4}$/.test(code)) {
+    const map = pendingShortByJid.get(jid);
+    return map?.get(code) || null;
+  }
+  return null;
+}
+
+/* -------------------- Inbound handlers -------------------- */
+async function handleTextMessage(jid, raw) {
+  const txt = String(raw || '').trim();
+  const lower = txt.toLowerCase();
+
+  // greet / menu
+  if (['/start','start','menu','help','/help','hi','hello'].includes(lower)) {
+    const driver = await findDriverByJid(jid);
+    if (!driver) {
+      await sendText(jid,
+        '👋 *VayaRide Driver*\n' +
+        'I could not find your driver profile by this WhatsApp number.\n' +
+        '• If you are registered, reply: *LINK your@email.com*\n' +
+        '• Otherwise register here:\n' +
+        `${PUBLIC_URL}/driver/register`
+      );
+      return;
+    }
+    const pending = pendingRideByJid.get(jid);
+    const short = pending ? String(pending).slice(-4) : null;
+    await sendText(jid,
+      `👋 Hi ${driver.name || ''}\n` +
+      `Status: *${driver.isAvailable ? 'ONLINE' : 'OFFLINE'}*\n` +
+      `${onlineKeyboardText(!!driver.isAvailable)}\n\n` +
+      'Commands:\n' +
+      '• *ONLINE* / *OFFLINE*\n' +
+      '• *STATS*\n' +
+      '• *WHOAMI*\n' +
+      (pending ? `• For the latest request: reply *ACCEPT* or *IGNORE* (or include code *${short}*)` : '')
+    );
+    return;
+  }
+
+  // link by email
+  if (lower.startsWith('link ')) {
+    const email = txt.slice(5).trim();
+    const linked = await linkDriverByEmail(email, jid);
+    if (linked) {
+      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nReply *ONLINE* to start receiving jobs.`);
+    } else {
+      await sendText(jid, `❌ Could not find a driver with email: ${email}\nMake sure you registered on the website.`);
+    }
+    return;
+  }
+
+  // availability
+  if (lower === 'online' || lower === '/online') {
+    const driver = await setAvailabilityByJid(jid, true);
+    if (!driver) { await sendText(jid, '❌ Driver profile not found. Reply *LINK your@email.com* to connect.'); return; }
+    await sendText(
+      jid,
+      '🟢 You are now *ONLINE*.\n' +
+      '➡️ Please *Share Live Location* so we can keep tracking your position for jobs:\n' +
+      '   • Tap 📎 (attach) → *Location* → *Share live location* → choose *Until turned off*.\n' +
+      '   • Keep live location ON while you are online.\n' +
+      'You can also send a one-off location, but *live location* is best.'
+    );
+    return;
+  }
+  if (lower === 'offline' || lower === '/offline') {
+    const driver = await setAvailabilityByJid(jid, false);
+    if (!driver) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    await sendText(jid, '🔴 You are now *OFFLINE*.\nReply *ONLINE* to start again.');
+    return;
+  }
+
+  // stats
+  if (lower === 'stats' || lower === '/stats') {
+    const d = await findDriverByJid(jid);
+    if (!d) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const full = await ensureAndGetDriverStats(d);
+    await sendText(jid, formatStatsMessage(full));
+    return;
+  }
+
+  // whoami
+  if (lower === 'whoami' || lower === '/whoami') {
+    const d = await findDriverByJid(jid);
+    if (!d) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    await sendText(jid,
+      `You are:\n` +
+      `• email: ${d.email || '-'}\n` +
+      `• name: ${d.name || '-'}\n` +
+      `• status: ${d.status}\n` +
+      `• online: ${d.isAvailable ? 'yes' : 'no'}\n` +
+      `• phone: ${d.phone || phoneFromJid(jid) || '-'}`
+    );
+    return;
+  }
+
+  // accept/ignore — allow plain ACCEPT/IGNORE or with 4-char short or full id
+  if (/^accept(\s+([a-f0-9]{4}|[a-f0-9]{24}))?$/i.test(lower)) {
+    const maybe = txt.split(/\s+/)[1]; // short or full
+    const rideId = resolveRideIdFromInput(jid, maybe);
+    if (!rideId) { await sendText(jid, '❌ No pending ride to accept.'); return; }
+    await tryAcceptRide(jid, rideId);
+    return;
+  }
+  if (/^(ignore|skip|decline)(\s+([a-f0-9]{4}|[a-f0-9]{24}))?$/i.test(lower)) {
+    const maybe = txt.split(/\s+/)[1]; // short or full
+    const rideId = resolveRideIdFromInput(jid, maybe);
+    if (!rideId) { await sendText(jid, '❌ No pending ride to ignore.'); return; }
+    await tryIgnoreRide(jid, rideId);
+    return;
+  }
+
+  // legacy: "ACCEPT <24hex>" still works
+  if (/^accept\s+[a-f0-9]{24}$/i.test(lower)) {
+    const rideId = txt.split(/\s+/)[1];
+    await tryAcceptRide(jid, rideId);
+    return;
+  }
+  if (/^(ignore|skip|decline)\s+[a-f0-9]{24}$/i.test(lower)) {
+    const rideId = txt.split(/\s+/)[1];
+    await tryIgnoreRide(jid, rideId);
+    return;
+  }
+
+  // unrecognized → quick help
+  await sendText(jid, '🤖 Commands: *ONLINE*, *OFFLINE*, *STATS*, *WHOAMI*, *ACCEPT*, *IGNORE* (optionally with code like *6869*).\nTip: Keep *Share live location* on while online.');
+}
+
+async function upsertDriverLocationByPhone(phone, lat, lng) {
+  await Driver.findOneAndUpdate(
+    { phone },
+    { $set: { location: { lat, lng }, lastSeenAt: new Date(), isAvailable: true } },
+    { new: true }
+  );
+
+  // Prefer numeric Telegram chatId if available so server.js can Number() it
+  const drvDoc = await Driver.findOne({ phone }).select('chatId').lean();
+  const idForEvents =
+    (drvDoc && Number.isFinite(Number(drvDoc.chatId))) ? Number(drvDoc.chatId) : phone; // fallback to phone
+
+  driverEvents.emit('driver:location', { chatId: idForEvents, location: { lat, lng } });
+}
+
+async function handleLocationMessage(jid, locationMessage) {
+  const lat = locationMessage.degreesLatitude;
+  const lng = locationMessage.degreesLongitude;
+
+  const phone = phoneFromJid(jid);
+  if (!phone) return;
+
+  await upsertDriverLocationByPhone(phone, lat, lng);
+  try { await sendText(jid, '📍 Location received. For best results, use *Share live location* (📎 → Location → Share live).'); } catch {}
+}
+
+// Live location updates come as liveLocationMessage (sent repeatedly by WhatsApp)
+async function handleLiveLocationMessage(jid, liveLocMessage) {
+  const lat = liveLocMessage.degreesLatitude;
+  const lng = liveLocMessage.degreesLongitude;
+
+  const phone = phoneFromJid(jid);
+  if (!phone) return;
+
+  await upsertDriverLocationByPhone(phone, lat, lng);
+
+  // Only thank once in a while (don’t spam every tick)
+  const key = `${jid}|live_thanks`;
+  const last = recentSends.get(key) || 0;
+  if (Date.now() - last > 60_000) { // 1 min
+    recentSends.set(key, Date.now());
+    try { await sendText(jid, '🛰️ Live location updating — thanks! Keep it on while ONLINE.'); } catch {}
   }
 }
 
-/* ---------------- Basic pages / auth ---------------- */
-app.get('/', (req, res) => {
-  const publicUrl = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-  res.render('landing', { title: 'VayaRide', publicUrl });
-});
+/* -------------------- ride actions -------------------- */
+async function tryAcceptRide(jid, rideId) {
+  const driver = await findDriverByJid(jid);
+  if (!driver) { await sendText(jid, '❌ Driver profile not found.'); return; }
 
-app.use('/driver', driverAuthRouter);
-app.use('/admin', adminRouter);
+  const ride = await Ride.findById(rideId);
+  if (!ride) { await sendText(jid, '❌ Ride not found.'); return; }
+  if (!ride.driverId) { ride.driverId = driver._id; }
+  ride.status = 'accepted';
+  await ride.save();
 
-/* ---------------- Rider dashboard API ---------------- */
-app.get('/api/rider-by-token/:token', async (req, res) => {
-  try {
-    const token = req.params.token;
-    const pin = req.query.pin;
-    const rider = await Rider.findOne({ dashboardToken: token }).lean();
-    if (!rider) return res.status(404).json({ error: 'Rider not found' });
+  await sendText(jid, '✅ You accepted the ride.');
 
-    const now = new Date();
-    if (!rider.dashboardTokenExpiry || rider.dashboardPin !== pin || now > new Date(rider.dashboardTokenExpiry)) {
-      return res.status(401).json({ error: 'Access denied. PIN or token expired' });
+  // Notify system (same event path as Telegram)
+  driverEvents.emit('ride:accepted', {
+    driverId: (Number.isFinite(Number(driver.chatId)) ? Number(driver.chatId) : (driver.phone || phoneFromJid(jid))),
+    rideId
+  });
+
+  // Send live map links (prefer numeric TG chatId for server-side APIs)
+  const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(rideId)}`;
+  const idForLink = (Number.isFinite(Number(driver.chatId)) ? String(driver.chatId) : (driver.phone ?? ''));
+  const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(idForLink)}`;
+  try { await sendText(jid, `🗺️ Open the live trip map (shares your GPS):\n${driverLink}\nTip: Keep *Share live location* ON for the trip.`); } catch {}
+
+  // clear pending (only if it matched)
+  const current = pendingRideByJid.get(jid);
+  if (current === rideId) {
+    pendingRideByJid.delete(jid);
+    const map = pendingShortByJid.get(jid);
+    if (map) {
+      for (const [k, v] of map) if (v === rideId) map.delete(k);
     }
+  }
+}
 
-    const orFilters = [];
-    const chatIdNum = Number(rider.chatId);
-    if (Number.isFinite(chatIdNum)) orFilters.push({ riderChatId: { $in: [chatIdNum, String(rider.chatId)] } });
-    if (rider.waJid) orFilters.push({ riderWaJid: rider.waJid });
-    const rideMatch = orFilters.length ? { $or: orFilters } : { _id: null };
+async function tryIgnoreRide(jid, rideId) {
+  const ride = await Ride.findById(rideId);
+  if (ride) {
+    driverEvents.emit('ride:ignored', { previousDriverId: phoneFromJid(jid) || 'wa', ride });
+  }
+  await sendText(jid, '🙈 Ignored. Looking for another driver…');
 
-    const [lastPaid, tripsCompleted, starsAgg] = await Promise.all([
-      Ride.findOne({ ...rideMatch, $or: [{ paymentStatus: 'paid' }, { status: 'completed' }] })
-          .sort({ paidAt: -1, completedAt: -1, updatedAt: -1, createdAt: -1 }).lean(),
-      Ride.countDocuments({ ...rideMatch, status: 'completed' }),
-      Ride.aggregate([
-        { $match: { ...rideMatch, riderRating: { $gte: 1 } } },
-        { $group: { _id: null, count: { $sum: 1 }, avg: { $avg: '$riderRating' } } }
-      ])
-    ]);
+  // clear pending (only if it matched)
+  const current = pendingRideByJid.get(jid);
+  if (current === rideId) {
+    pendingRideByJid.delete(jid);
+    const map = pendingShortByJid.get(jid);
+    if (map) {
+      for (const [k, v] of map) if (v === rideId) map.delete(k);
+    }
+  }
+}
 
-    const lastPayment = lastPaid
-      ? {
-          rideId: String(lastPaid._id),
-          amount: Number(lastPaid.finalAmount ?? lastPaid.estimate ?? 0) || 0,
-          method: lastPaid.paymentMethod || null,
-          at: lastPaid.paidAt || lastPaid.completedAt || lastPaid.updatedAt || lastPaid.createdAt || null
+/* -------------------- outbound API (export) -------------------- */
+export async function waNotifyDriverNewRequest({ to, driver, ride }) {
+  const phone = to || driver?.phone;
+  if (!phone) return;
+
+  const jid = jidFromPhone(phone);
+  if (!jid) return;
+
+  // Record "pending" so driver can just reply ACCEPT / IGNORE
+  setPendingFor(jid, ride._id);
+
+  const short = String(ride._id).slice(-4).toLowerCase();
+  const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
+  const body =
+    '🚗 *New Ride Request*\n' +
+    `• Vehicle: *${(ride.vehicleType || 'normal').toUpperCase()}*\n` +
+    (ride.estimate ? `• Estimate: *R${ride.estimate}*\n` : '') +
+    (ride.pickup ? `• Pickup: ${toMap(ride.pickup)}\n` : '') +
+    (ride.destination ? `• Drop:   ${toMap(ride.destination)}\n` : '') +
+    '\n' +
+    `Reply *ACCEPT* or *IGNORE* (or include code *${short}* if you have multiple).`;
+
+  // Try to send buttons; if it fails, fall back to text
+  try {
+    await sendButtons(jid, body, String(ride._id));
+  } catch (e) {
+    logger.warn('[WA-DRIVER] buttons send failed, falling back to text: %s', e?.message || e);
+    await sendText(jid, body);
+  }
+}
+
+export async function waNotifyDriverArrived({ to }) {
+  if (!to) return;
+  await sendText(jidFromPhone(to), '📍 Arrival detected at pickup.');
+}
+
+export async function waNotifyDriverFinishSummary({ to, body }) {
+  if (!to) return;
+  await sendText(jidFromPhone(to), body);
+}
+
+/* -------------------- init / lifecycle -------------------- */
+async function setupClient() {
+  if (initializing) return;
+  initializing = true;
+
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`[WA-DRIVER] Using WA v${version.join('.')}, latest: ${isLatest}`);
+
+    connState = 'connecting';
+
+    sock = makeWASocket({
+      version,
+      logger,
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      browser: ['VayaRide Driver', 'Chrome', '1.0.0'],
+      generateHighQualityLinkPreview: false,
+      qrTimeout: 60_000,
+      connectTimeoutMs: 60_000,
+      defaultQueryTimeoutMs: 60_000,
+      keepAliveIntervalMs: 10_000,
+      markOnlineOnConnect: true,
+      syncFullHistory: false,
+      printQRInTerminal: process.env.WA_DRIVER_SHOW_QR === '1'
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        currentQR = qr;
+        try {
+          if (process.env.WA_DRIVER_SHOW_QR === '1') {
+            console.log('\n' + await qrcode.toString(qr, { type: 'terminal', small: true }));
+          }
+          driverWaEvents.emit('qr', await qrcode.toDataURL(qr));
+        } catch (e) {
+          logger.warn('[WA-DRIVER] could not generate QR dataURL: %s', e?.message || e);
         }
-      : null;
+      }
 
-    const riderStars = starsAgg && starsAgg.length
-      ? { avg: Number(starsAgg[0].avg.toFixed(2)), count: starsAgg[0].count }
-      : { avg: null, count: 0 };
+      if (connection === 'open') {
+        currentQR = null;
+        connState = 'connected';
+        console.log('✅ WhatsApp (driver) connected');
+      }
 
-    res.set('Cache-Control', 'no-store');
-    return res.json({
-      platform: rider.platform || null,
-      chatId: Number.isFinite(chatIdNum) ? chatIdNum : null,
-      waJid: rider.waJid || null,
-      name: rider.name || '',
-      email: rider.email || '',
-      credit: rider.credit ?? 0,
-      trips: tripsCompleted,
-      lastPayment,
-      riderStars
+      if (connection === 'close') {
+        const code =
+          lastDisconnect?.error?.output?.statusCode ??
+          lastDisconnect?.error?.status ?? 0;
+        const reason = lastDisconnect?.error?.data?.reason;
+
+        connState = 'disconnected';
+
+        const isLoggedOut =
+          code === DisconnectReason.loggedOut || code === 401 || reason === '401' || reason === 'logged_out';
+        const badSession =
+          code === DisconnectReason.badSession || reason === 'bad_session';
+
+        if (isLoggedOut || badSession) {
+          console.log('[WA-DRIVER] Logged out / bad session, clearing creds…');
+          try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
+          await delay(1500);
+          initializing = false;
+          return setupClient();
+        }
+
+        console.log('[WA-DRIVER] reconnecting in 5s…');
+        await delay(5000);
+        initializing = false;
+        return setupClient();
+      }
     });
-  } catch (e) {
-    console.error('rider-by-token error:', e);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
 
-/* ---- WhatsApp (Rider) QR/Status helpers ---- */
-app.post('/wa/reset', async (req, res) => {
-  await resetWhatsAppSession();
-  res.json({ ok: true, message: 'WhatsApp session reset. Open /qrcode to scan again.' });
-});
+    // inbound messages
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+      for (const m of (messages || [])) {
+        try {
+          const fromMe = m.key?.fromMe;
+          const jid = m.key?.remoteJid;
+          if (fromMe || jid === 'status@broadcast') continue;
 
-app.get('/qrcode', async (req, res) => {
-  if (isWhatsAppConnected()) return res.send('<h2>✅ WhatsApp is connected.</h2>');
-  try {
-    const dataUrl = await waitForQrDataUrl(25000);
-    res.send(`<div style="font-family:system-ui;display:grid;place-items:center;gap:12px">
-      <h3>Scan to connect WhatsApp</h3>
-      <img src="${dataUrl}" style="width:320px;height:320px;image-rendering:pixelated;border:8px solid #eee;border-radius:12px" />
-      <p>If it stalls, refresh or try <code>/wa/reset</code>.</p>
-    </div>`);
-  } catch {
-    const pngPath = path.join(__dirname, 'public/wa-qr.png');
-    const fallback = fs.existsSync(pngPath)
-      ? `<img src="/wa-qr.png" style="width:320px;height:320px;image-rendering:pixelated;border:8px solid #eee;border-radius:12px" />`
-      : '<em>No QR yet. Try again shortly.</em>';
-    res.send(`<div style="font-family:system-ui;display:grid;place-items:center;gap:12px">
-      <h3>QR not ready</h3>${fallback}
-      <p>Or call <a href="/wa/reset">/wa/reset</a> then refresh.</p>
-    </div>`);
-  }
-});
+          const msg = m.message || {};
+          if (
+            msg.protocolMessage ||
+            msg.reactionMessage ||
+            msg.pollUpdateMessage ||
+            msg.pollCreationMessage ||
+            msg.ephemeralMessage ||
+            msg.viewOnceMessage ||
+            msg.viewOnceMessageV2
+          ) continue;
 
-app.get('/api/whatsapp/status', (req, res) => {
-  const status = getConnectionStatus();
-  res.json({ status, connected: isWhatsAppConnected() });
-});
+          // cache pushName
+          if (m.pushName) driverNames.set(jid, m.pushName);
 
-/* ---- WhatsApp (Driver) QR/Status helpers ---- */
-async function doResetDriverWA(res) {
-  try {
-    await resetWhatsAppDriverSession();
-    res.json({ ok: true, message: 'Driver WA session reset. Open /driver-qrcode to scan again.' });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'reset failed' });
-  }
-}
-app.post('/driver-wa/reset', async (req, res) => { await doResetDriverWA(res); });
-// allow GET as well (easier while testing)
-app.get('/driver-wa/reset', async (req, res) => { await doResetDriverWA(res); });
-
-app.get('/driver-qrcode', async (req, res) => {
-  if (isWhatsAppDriverConnected()) return res.send('<h2>✅ Driver WhatsApp is connected.</h2>');
-  try {
-    const dataUrl = await waitForDriverQrDataUrl(25000);
-    res.send(`<div style="font-family:system-ui;display:grid;place-items:center;gap:12px">
-      <h3>Scan to connect <em>Driver</em> WhatsApp</h3>
-      <img src="${dataUrl}" style="width:320px;height:320px;image-rendering:pixelated;border:8px solid #eee;border-radius:12px" />
-      <p>If it stalls, refresh or visit <code>/driver-wa/reset</code>.</p>
-    </div>`);
-  } catch (e) {
-    res.status(500).send('Driver QR not ready: ' + (e?.message || e));
-  }
-});
-
-// Alias QR page (nice pretty page that auto-refreshes)
-app.get('/driver-wa-qr', async (req, res) => {
-  if (isWhatsAppDriverConnected()) return res.send('<h2>✅ Driver WhatsApp is connected.</h2>');
-  try {
-    const dataUrl = await waitForDriverQrDataUrl(25000); // waits up to 25s
-    res.type('html').send(`
-      <!doctype html>
-      <html>
-        <head>
-          <meta charset="utf-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <title>Driver WhatsApp QR</title>
-          <style>
-            body{font-family:sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
-            .wrap{max-width:520px;text-align:center}
-            img{width:100%;height:auto;background:#fff;padding:12px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
-            .hint{opacity:.75;margin-top:12px}
-          </style>
-        </head>
-        <body>
-          <div class="wrap">
-            <h2>Scan to sign in (Driver WA)</h2>
-            <img src="${dataUrl}" alt="WhatsApp QR" />
-            <div class="hint">Open WhatsApp → Linked devices → Link a device.</div>
-            <script>setTimeout(() => location.reload(), 20000);</script>
-          </div>
-        </body>
-      </html>
-    `);
-  } catch (e) {
-    res.type('html').send(`
-      <!doctype html>
-      <html>
-        <head>
-          <meta charset="utf-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <title>Driver WhatsApp QR</title>
-          <style>
-            body{font-family:sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
-            .wrap{max-width:520px;text-align:center}
-          </style>
-        </head>
-        <body>
-          <div class="wrap">
-            <h2>Preparing QR…</h2>
-            <p>Please keep this page open.</p>
-            <script>setTimeout(() => location.reload(), 3000);</script>
-          </div>
-        </body>
-      </html>
-    `);
-  }
-});
-
-// Existing status endpoint
-app.get('/driver-wa/status', (req, res) => {
-  res.json({ connected: isWhatsAppDriverConnected(), state: getDriverConnectionStatus() });
-});
-
-// Alias status for API-style path
-app.get('/api/wa-driver/status', (req, res) => {
-  res.json({ status: getDriverConnectionStatus(), connected: isWhatsAppDriverConnected() });
-});
-
-/* ---------------- Legacy rider endpoint ---------------- */
-app.get('/api/rider/:chatId', async (req, res) => {
-  const rider = await Rider.findOne({ chatId: req.params.chatId });
-  if (!rider) return res.status(404).json({ error: 'Rider not found' });
-  res.json({ name: rider.name, email: rider.email, credit: rider.credit, trips: rider.trips || 0 });
-});
-
-/* ---------------- Telegram webhooks if used ---------------- */
-app.post('/rider-bot', (req, res) => { riderBot.processUpdate?.(req.body); res.sendStatus(200); });
-app.post('/driver-bot', (req, res) => { driverBot.processUpdate?.(req.body); res.sendStatus(200); });
-
-/* Map/track page (back-compat) */
-app.get('/map/:rideId', (req, res) => {
-  const url = `/track.html?rideId=${encodeURIComponent(req.params.rideId)}`;
-  res.redirect(302, url);
-});
-
-/* ---------------- Tracking APIs ---------------- */
-function isRideLinkExpired(ride) {
-  if (['cancelled', 'completed', 'payment_pending'].includes(ride.status)) return { expired: true, reason: ride.status };
-  if (TRACK_LINK_TTL_HOURS > 0) {
-    const made = new Date(ride.createdAt || Date.now());
-    const expiresAt = new Date(made.getTime() + TRACK_LINK_TTL_HOURS * 3600 * 1000);
-    if (Date.now() > +expiresAt) return { expired: true, reason: 'ttl', expiresAt };
-  }
-  return { expired: false, reason: null };
-}
-
-app.get('/api/ride/:rideId', async (req, res) => {
-  try {
-    const ride = await Ride.findById(req.params.rideId).lean();
-    if (!ride) return res.status(404).json({ error: 'Ride not found' });
-
-    const exp = isRideLinkExpired(ride);
-    if (exp.expired) {
-      return res.status(410).json({
-        error: 'expired',
-        status: ride.status,
-        reason: exp.reason,
-        createdAt: ride.createdAt,
-        cancelledAt: ride.cancelledAt || null,
-        completedAt: ride.completedAt || null,
-        expiresAt: exp.expiresAt || null
-      });
-    }
-
-    let driverChatId = null;
-    if (ride.driverId) {
-      const drv = await Driver.findById(ride.driverId).lean();
-      if (drv && typeof drv.chatId === 'number') driverChatId = drv.chatId;
-    }
-
-    res.json({
-      pickup: ride.pickup,
-      destination: ride.destination,
-      status: ride.status || 'pending',
-      driverChatId,
-      pickedAt: ride.pickedAt || ride.startedAt || null,
-      completedAt: ride.completedAt || null,
-      createdAt: ride.createdAt
-    });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.get('/api/driver-last-loc/:chatId', async (req, res) => {
-  try {
-    const chatId = Number(req.params.chatId);
-    if (Number.isNaN(chatId)) return res.status(400).json({});
-    const driver = await Driver.findOne({ chatId }).lean();
-    if (!driver || !driver.location) {
-      console.log(`ℹ️ No last location for driver chatId=${chatId}`);
-      return res.json({});
-    }
-    console.log(`↩️ API last loc chatId=${chatId} lat=${driver.location.lat} lng=${driver.location.lng}`);
-    res.json(driver.location);
-  } catch {
-    res.json({});
-  }
-});
-
-/* -------- live driver tickers (per driver) -------- */
-const lastLocByDriver = new Map();     // chatId -> { lat, lng, ts }
-const tickerByDriver = new Map();      // chatId -> intervalId
-function stopDriverTicker(chatId) {
-  const id = tickerByDriver.get(Number(chatId));
-  if (id) {
-    clearInterval(id);
-    tickerByDriver.delete(Number(chatId));
-  }
-  lastLocByDriver.delete(Number(chatId));
-}
-
-/* ---------------- utilities ---------------- */
-function toRad(x){ return (x * Math.PI) / 180; }
-function haversineMeters(a, b) {
-  const R = 6371000;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lng - a.lng);
-  const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon/2)**2;
-  return 2 * R * Math.asin(Math.sqrt(Math.max(0, s)));
-}
-
-/* ⭐⭐ PATH CAPTURE (driver tracking) — minimal, write-capped */
-const lastPathByRide = new Map(); // rideId -> { lat, lng, ts }
-async function appendPathPoint(rideId, lat, lng, label = '') {
-  try {
-    const key = String(rideId);
-    const now = Date.now();
-    const prev = lastPathByRide.get(key);
-    const fastEnough = !prev || (now - prev.ts) >= 2500; // 2.5s min
-    const farEnough  = !prev || haversineMeters(prev, { lat, lng }) >= 8; // 8m min
-
-    if (!fastEnough && !farEnough) return;
-
-    await Ride.updateOne({ _id: rideId }, { $push: { path: { lat, lng, ts: new Date() } } });
-    lastPathByRide.set(key, { lat, lng, ts: now });
-
-    if (label) console.log(`🧭 PATH ${label} ride=${key} lat=${lat.toFixed(6)} lng=${lng.toFixed(6)}`);
-  } catch (e) {
-    console.warn('appendPathPoint failed:', e?.message || e);
-  }
-}
-
-/* ---------------- Live driver broadcasts (per-driver + per-ride) ---------------- */
-driverEvents.on('driver:location', async ({ chatId, location }) => {
-  try {
-    const cId = Number(chatId);
-    const { lat, lng } = location || {};
-    if (typeof lat !== 'number' || typeof lng !== 'number') return;
-
-    lastLocByDriver.set(cId, { lat, lng, ts: Date.now() });
-    io.emit(`driver:${cId}:location`, { lat, lng });
-
-    // find active ride for this driver
-    const drv = await Driver.findOne({ chatId: cId }).select('_id').lean();
-    if (drv?._id) {
-      const ride = await Ride.findOne({
-        driverId: drv._id,
-        status: { $in: ['accepted', 'enroute'] }
-      }).sort({ updatedAt: -1 }).lean();
-
-      if (ride?._id) {
-        io.emit(`ride:${ride._id}:driverLocation`, { lat, lng });
-
-        appendPathPoint(ride._id, lat, lng);
-
-        // ---------- arrival detection ----------
-        if (ride.status === 'accepted' && ride.pickup?.lat && ride.pickup?.lng) {
-          const dMeters = haversineMeters({ lat, lng }, ride.pickup);
-          if (dMeters <= 35) {
-            const now = new Date();
-            const lastEmitTs = ride._lastArriveEmitAt ? new Date(ride._lastArriveEmitAt).getTime() : 0;
-            const COOLDOWN_MS = 20 * 1000;
-            const cooled = now.getTime() - lastEmitTs > COOLDOWN_MS;
-
-            const result = await Ride.updateOne(
-              { _id: ride._id, arrivedNotified: { $ne: true } },
-              { $set: { arrivedNotified: true, arrivedAt: now, _lastArriveEmitAt: now } }
-            );
-            const firstTime = result.modifiedCount > 0;
-
-            if (firstTime || (ride.arrivedNotified && cooled)) {
-              try {
-                driverEvents.emit('ride:arrived', { driverId: chatId, rideId: String(ride._id), firstTime });
-                io.emit(`ride:${ride._id}:arrived`);
-              } finally {
-                if (!firstTime) {
-                  await Ride.updateOne({ _id: ride._id }, { $set: { _lastArriveEmitAt: now } });
-                }
-              }
+          // Button replies
+          const btn = msg.buttonsResponseMessage || msg.templateButtonReplyMessage || null;
+          if (btn?.selectedButtonId) {
+            const id = String(btn.selectedButtonId);
+            if (id.startsWith('accept_')) {
+              const rideId = id.slice('accept_'.length);
+              await tryAcceptRide(jid, rideId);
+              continue;
+            }
+            if (id.startsWith('ignore_')) {
+              const rideId = id.slice('ignore_'.length);
+              await tryIgnoreRide(jid, rideId);
+              continue;
             }
           }
+
+          // Location / Live Location / Text
+          const live = msg.liveLocationMessage || null;
+          const loc  = msg.locationMessage || null;
+          let text =
+            msg.conversation ||
+            msg.extendedTextMessage?.text ||
+            msg.imageMessage?.caption ||
+            msg.videoMessage?.caption || '';
+          text = (text || '').trim();
+
+          if (live) { await handleLiveLocationMessage(jid, live); continue; }
+          if (loc)  { await handleLocationMessage(jid, loc); continue; }
+          if (text) { await handleTextMessage(jid, text); continue; }
+        } catch (e) {
+          console.error('[WA-DRIVER] handle error:', e);
+          try {
+            const rjid = m?.key?.remoteJid;
+            if (isJid(rjid)) {
+              await sendText(rjid, '⚠️ Error. Please try again.');
+            } else {
+              logger.warn('[WA-DRIVER] skip error reply, invalid JID: %s', rjid);
+            }
+          } catch {}
         }
       }
-    }
+    });
 
-    // heartbeat rebroadcast loop
-    if (!tickerByDriver.has(cId)) {
-      const id = setInterval(async () => {
-        const last = lastLocByDriver.get(cId);
-        if (!last) return;
-
-        const staleMs = Date.now() - last.ts;
-        if (staleMs > 2 * 60 * 1000) { stopDriverTicker(cId); return; }
-
-        io.emit(`driver:${cId}:location`, { lat: last.lat, lng: last.lng });
-
-        try {
-          const drv2 = await Driver.findOne({ chatId: cId }).select('_id').lean();
-          if (!drv2?._id) return;
-          const active = await Ride.findOne({
-            driverId: drv2._id,
-            status: { $in: ['accepted', 'enroute'] }
-          }).sort({ updatedAt: -1 }).select('_id').lean();
-          if (active?._id) io.emit(`ride:${active._id}:driverLocation`, { lat: last.lat, lng: last.lng });
-        } catch {}
-      }, 1000);
-      tickerByDriver.set(cId, id);
-    }
-  } catch (e) {
-    console.warn('driver:location broadcast failed:', e?.message || e);
+  } catch (err) {
+    console.error('❌ Error setting up WA driver client:', err);
+  } finally {
+    initializing = false;
   }
-});
+}
 
-/* ---------------- BOOKING DISPATCH PIPELINE ---------------- */
-async function dispatchToNearestDriver({ rideId, excludeDriverIds = [] }) {
-  console.log('[dispatch] called with rideId=', rideId);
-  const ride = await Ride.findById(rideId);
-  console.log('[dispatch] ride status=', ride?.status, 'pickup=', ride?.pickup, 'vehicleType=', ride?.vehicleType);
-
-  if (!ride || ride.status !== 'pending') return;
-
-  const chosen = await assignNearestDriver(ride.pickup, {
-    vehicleType: ride.vehicleType || null,
-    exclude: excludeDriverIds
-  });
-  console.log('[dispatch] chosen driver=', chosen && { _id: chosen._id, chatId: chosen.chatId, isAvailable: chosen.isAvailable, name: chosen.name });
-
-  if (!chosen || !hasNumericChatId(chosen)) {
-    try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, '😕 No drivers are available right now. We will keep trying shortly.'); } catch {}
-    try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, '😕 No drivers are available right now. We will keep trying shortly.'); } catch {}
+/* -------------------- public control API -------------------- */
+export function initWhatsappDriverBot() {
+  if (sock || initializing) {
+    console.log('[WA-DRIVER] already initialized');
     return;
   }
+  console.log('🚀 Initializing WhatsApp *Driver* Bot…');
+  setupClient();
+}
 
-  try { await setEstimateOnRide(ride._id, chosen.location || null); } catch {}
+export function isWhatsAppDriverConnected() {
+  return !!(sock && sock.ws && sock.ws.readyState === 1);
+}
 
-  await logActivity({
-    rideId: ride._id,
-    type: 'assigned',
-    actorType: 'system',
-    message: `Assigned to driver ${chosen.name || chosen.email || chosen.chatId || chosen._id}`,
-    meta: { driverId: String(chosen._id), driverChatId: chosen.chatId ?? null }
+export function getDriverConnectionStatus() { return connState; }
+
+export async function waitForDriverQrDataUrl(timeoutMs = 25000) {
+  if (currentQR) return qrcode.toDataURL(currentQR);
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout waiting for driver QR')), timeoutMs);
+    driverWaEvents.once('qr', (dataUrl) => { clearTimeout(t); resolve(dataUrl); });
   });
+}
 
-  const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
-  const text =
-    `🚗 <b>New Ride Request</b>\n\n` +
-    `• Vehicle: <b>${(ride.vehicleType || 'normal').toUpperCase()}</b>\n` +
-    (ride.estimate ? `• Estimate: <b>R${ride.estimate}</b>\n` : '') +
-    `• Pickup: <a href="${toMap(ride.pickup)}">Open Map</a>\n` +
-    `• Drop:   <a href="${toMap(ride.destination || ride.pickup)}">Open Map</a>\n\n` +
-    `Accept to proceed.`;
-
-  // Telegram DM
+export async function resetWhatsAppDriverSession() {
   try {
-    await DB.sendMessage(chosen.chatId, text, {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '✅ Accept', callback_data: `accept_${ride._id}` },
-          { text: '🙈 Ignore', callback_data: `ignore_${ride._id}` }
-        ]]
-      }
-    });
-  } catch (e) {
-    console.warn('Failed to DM driver request (Telegram):', e?.message || e);
-  }
-
-  // WhatsApp DM to the driver (NEW) – only if driver has phone saved
-  try {
-    await waNotifyDriverNewRequest({ driver: chosen, ride });
-  } catch (e) {
-    console.warn('Failed to DM driver request (WhatsApp):', e?.message || e);
+    if (sock) {
+      try { await sock.logout(); } catch {}
+      try { sock.end?.(); } catch {}
+      sock = null;
+    }
+    try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
+    currentQR = null;
+    connState = 'disconnected';
+  } finally {
+    setupClient();
   }
 }
 
-riderEvents.on('booking:new', async ({ rideId }) => {
-  try {
-    if (!rideId) return;
-    await logActivity({ rideId, type: 'request', actorType: 'rider', message: 'Rider requested a trip' });
-    await dispatchToNearestDriver({ rideId });
-  } catch (e) {
-    console.error('booking:new handler error:', e?.message || e);
-  }
-});
-
-driverEvents.on('ride:ignored', async ({ previousDriverId, ride }) => {
-  try {
-    if (!ride || !ride._id) return;
-    await logActivity({
-      rideId: ride._id,
-      type: 'ignored',
-      actorType: 'driver',
-      actorId: String(previousDriverId),
-      message: `Driver ${previousDriverId} ignored the ride`
-    });
-    const prevDriver = await Driver.findOne({ chatId: Number(previousDriverId) }).lean();
-    const excludeIds = prevDriver ? [prevDriver._id] : [];
-    await dispatchToNearestDriver({ rideId: String(ride._id), excludeDriverIds: excludeIds });
-  } catch (e) {
-    console.error('ride:ignored handler error:', e?.message || e);
-  }
-});
-
-/* ➕ When the driver accepts, send links */
-driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
-  try {
-    const ride = await Ride.findById(rideId);
-    if (!ride) return;
-
-    if (!ride.driverId) {
-      const drv = await Driver.findOne({ chatId: Number(driverId) });
-      if (drv) { ride.driverId = drv._id; await ride.save(); }
-    }
-
-    await logActivity({
-      rideId,
-      type: 'accepted',
-      actorType: 'driver',
-      actorId: String(driverId),
-      message: `Driver ${driverId} accepted the ride`
-    });
-
-    const base = `${process.env.PUBLIC_URL}/track.html?rideId=${encodeURIComponent(rideId)}`;
-    const riderLink  = base;
-    const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(driverId)}`;
-
-    try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, `🚗 Your ride is on the way. Track here:\n${riderLink}`); } catch {}
-    try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, `🚗 Your ride is on the way. Track here:\n${riderLink}`); } catch {}
-    try { await DB.sendMessage(driverId, `🗺️ Open the live trip map (shares your GPS):\n${driverLink}`); } catch {}
-  } catch (e) {
-    console.warn('ride:accepted handler failed:', e?.message || e);
-  }
-});
-
-/* Arrived → notify + socket */
-driverEvents.on('ride:arrived', async ({ rideId, firstTime = false }) => {
-  try {
-    const ride = await Ride.findById(rideId);
-    if (!ride) return;
-
-    await logActivity({ rideId, type: 'arrived', actorType: 'driver', message: 'Driver arrived at pickup' });
-
-    if (firstTime) {
-      try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, '📍 Your driver has arrived at the pickup point.'); } catch {}
-      try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, '📍 Your driver has arrived at the pickup point.'); } catch {}
-    }
-
-    io.emit(`ride:${rideId}:arrived`);
-  } catch (e) {
-    console.warn('ride:arrived handler failed:', e?.message || e);
-  }
-});
-
-/* Picked event (admin feed) */
-driverEvents.on('ride:picked', async ({ rideId }) => {
-  try {
-    await logActivity({ rideId, type: 'picked', actorType: 'driver', message: 'Rider picked up', meta: { by: 'unknown' } });
-  } catch (e) {
-    console.warn('ride:picked handler failed:', e?.message || e);
-  }
-});
-
-driverEvents.on('ride:started', async ({ rideId, by }) => {
-  try {
-    const ride = await Ride.findById(rideId);
-    if (!ride) return;
-
-    try { await Ride.updateOne({ _id: rideId }, { $unset: { _lastArriveEmitAt: 1 } }); } catch {}
-
-    await logActivity({ rideId, type: 'started', actorType: 'driver', message: 'Trip started', meta: { by: by || 'unknown' } });
-
-    const origin = (by || '').toLowerCase();
-    const skipNotify = origin === 'web' || origin === 'driver_bot';
-    if (skipNotify) return;
-
-    try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, '▶️ Your trip has started. Enjoy the ride!'); } catch {}
-    try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, '▶️ Your trip has started. Enjoy the ride!'); } catch {}
-  } catch (e) {
-    console.warn('ride:started handler failed:', e?.message || e);
-  }
-});
-
-/* ---------------- Start/Picked/Cancel APIs (web UI buttons) ---------------- */
-app.post('/api/ride/:rideId/start', async (req, res) => {
-  try {
-    const { rideId } = req.params;
-    const ride = await Ride.findById(rideId);
-    if (!ride) return res.status(404).json({ error: 'Ride not found' });
-
-    if (!['enroute','completed','cancelled'].includes(ride.status)) {
-      ride.status = 'enroute';
-      await ride.save();
-    }
-
-    const riderChatId = ride.riderChatId || ride.riderTelegramChatId || ride.rider?.chatId || null;
-    if (riderChatId && riderBot) {
-      try { await riderBot.sendMessage(Number(riderChatId), '🚗 Your driver has started the trip and is heading to you.'); } catch {}
-    }
-
-    try { driverEvents.emit('ride:started', { rideId: ride._id.toString(), by: 'web' }); } catch {}
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('POST /api/ride/:rideId/start error', err);
-    return res.status(500).json({ error: 'Internal error' });
-  }
-});
-
-app.post('/api/ride/:rideId/picked', async (req, res) => {
-  try {
-    const { rideId } = req.params;
-    const ride = await Ride.findById(rideId);
-    if (!ride) return res.status(404).json({ error: 'Ride not found' });
-
-    if (!['enroute','completed','cancelled'].includes(ride.status)) {
-      ride.status = 'enroute';
-      await ride.save();
-    }
-
-    const riderChatId = ride.riderChatId || ride.riderTelegramChatId || ride.rider?.chatId || null;
-    if (riderChatId && riderBot) {
-      try { await riderBot.sendMessage(Number(riderChatId), '✅ You have been picked up. Heading to your destination now.'); } catch {}
-    }
-
-    try { driverEvents.emit('ride:picked', { rideId: ride._id.toString(), by: 'web' }); } catch {}
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('POST /api/ride/:rideId/picked error', err);
-    return res.status(500).json({ error: 'Internal error' });
-  }
-});
-
-app.post('/api/ride/:rideId/cancel', async (req, res) => {
-  try {
-    const { rideId } = req.params;
-    const { reason, note } = req.body || {};
-    const ride = await Ride.findById(rideId);
-    if (!ride) return res.status(404).json({ error: 'Ride not found' });
-
-    let cancelLat = null, cancelLng = null;
-    if (ride.driverId) {
-      const drv = await Driver.findById(ride.driverId).lean();
-      if (drv?.location && typeof drv.location.lat === 'number' && typeof drv.location.lng === 'number') {
-        cancelLat = drv.location.lat;
-        cancelLng = drv.location.lng;
-        await appendPathPoint(ride._id, cancelLat, cancelLng, 'CANCEL');
-      }
-    }
-
-    if (ride.status !== 'cancelled') {
-      ride.status = 'cancelled';
-      try {
-        ride.cancellationReason = reason || null;
-        ride.cancellationNote = (reason === 'Other' ? (note || '') : note) || null;
-      } catch {}
-      ride.cancelledAt = new Date();
-      ride.cancelledBy = 'driver';
-
-      if (cancelLat != null && cancelLng != null && ride.pickup?.lat && ride.pickup?.lng) {
-        const meters = haversineMeters({ lat: ride.pickup.lat, lng: ride.pickup.lng }, { lat: cancelLat, lng: cancelLng });
-        ride.cancelDriverLoc = { lat: cancelLat, lng: cancelLng };
-        ride.cancelDistanceKm = Number((meters / 1000).toFixed(2));
-      }
-
-      await ride.save();
-    }
-
-    const riderChatId = ride.riderChatId || ride.riderTelegramChatId || ride.rider?.chatId || null;
-    if (riderChatId && riderBot) {
-      const cleanReason = String(reason || 'Trip cancelled').trim();
-      const cleanNote = (note ? String(note).trim() : '');
-      const msg =
-        `❌ <b>Your trip was cancelled by the driver.</b>\n` +
-        `• Reason: <i>${cleanReason}</i>` +
-        (cleanNote ? `\n• Note: ${cleanNote}` : '') +
-        (ride.cancelDistanceKm != null ? `\n• Distance from pickup: ~${ride.cancelDistanceKm} km` : '');
-      try { await riderBot.sendMessage(Number(riderChatId), msg, { parse_mode: 'HTML' }); } catch {}
-    }
-
-    await logActivity({
-      rideId: ride._id,
-      type: 'cancelled',
-      actorType: 'driver',
-      message: `Ride cancelled (${reason || 'unspecified'})`,
-      meta: { reason: reason || null, note: note || null, lat: cancelLat, lng: cancelLng, cancelDistanceKm: ride.cancelDistanceKm ?? null }
-    });
-
-    io.emit(`ride:${rideId}:cancelled`, { reason: reason || null, cancelDistanceKm: ride.cancelDistanceKm ?? null });
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('POST /api/ride/:rideId/cancel error', err);
-    return res.status(500).json({ error: 'Internal error' });
-  }
-});
-
-/* ---------------- Socket.IO ---------------- */
-io.on('connection', (sock) => {
-  console.log('🔌 Socket connected:', sock.id);
-
-  /* Driver’s browser can stream HTML5 GPS */
-  sock.on('driver:mapLocation', async (payload = {}) => {
-    try {
-      const { rideId, chatId, lat, lng } = payload || {};
-      if (!rideId || !Number.isFinite(Number(chatId))) return;
-      if (typeof lat !== 'number' || typeof lng !== 'number') return;
-
-      const ride = await Ride.findById(rideId).lean();
-      if (!ride || !ride.driverId) return;
-
-      const drv = await Driver.findById(ride.driverId).lean();
-      if (!drv || Number(drv.chatId) !== Number(chatId)) return;
-
-      await Driver.findOneAndUpdate(
-        { _id: drv._id },
-        { $set: { location: { lat, lng }, lastSeenAt: new Date(), isAvailable: true } },
-        { new: true }
-      );
-
-      driverEvents.emit('driver:location', { chatId: Number(chatId), location: { lat, lng } });
-    } catch (e) {
-      console.warn('driver:mapLocation error:', e?.message || e);
-    }
-  });
-});
-
-/* ---------------- DEV/DIAG ENDPOINTS (safe to leave; no state changes) ---------------- */
-// Force-dispatch a pending ride (helps verify assignment and DM)
-app.post('/dev/dispatch/:rideId', async (req, res) => {
-  try {
-    await dispatchToNearestDriver({ rideId: req.params.rideId });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('dev/dispatch error:', e);
-    res.status(500).json({ ok: false, error: e?.message || 'err' });
-  }
-});
-
-// Ping a driver on Telegram by chatId (delivery test)
-app.get('/dev/ping-driver/:chatId', async (req, res) => {
-  try {
-    await DB.sendMessage(Number(req.params.chatId), '🔔 test: driver ping');
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('ping failed:', e?.message || e);
-    res.status(500).json({ ok: false, error: e?.message || 'err' });
-  }
-});
-
-// Ping a driver on WhatsApp by phone (+27...)
-app.get('/dev/ping-wa-driver/:phone', async (req, res) => {
-  try {
-    await sendWhatsAppDriverMessage(req.params.phone, '🔔 test: WA driver ping');
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('wa ping failed:', e?.message || e);
-    res.status(500).json({ ok: false, error: e?.message || 'err' });
-  }
-});
-
-/* ---------------- Start server ---------------- */
-server.listen(PORT, () => {
-  console.log(`🚀 Server is running at http://localhost:${PORT}`);
-});
-
-/* ---------------- Graceful shutdown ---------------- */
-async function gracefulExit(signal = 'SIGINT') {
-  try {
-    console.log(`\n🧹 Shutting down (${signal})...`);
-    await new Promise((resolve) => server.close(resolve));
-    try { await new Promise((resolve) => io.close(resolve)); } catch {}
-    try { await riderBot?.stopPolling?.(); } catch {}
-    try { await driverBot?.stopPolling?.(); } catch {}
-    try {
-      for (const id of tickerByDriver.values()) clearInterval(id);
-      tickerByDriver.clear();
-      lastLocByDriver.clear();
-    } catch {}
-    try {
-      driverEvents.removeAllListeners();
-      riderEvents.removeAllListeners();
-    } catch {}
-    try { await mongoose.connection.close(); } catch {}
-    console.log('✅ Clean shutdown complete. Bye!');
-    process.exit(0);
-  } catch (err) {
-    console.error('⚠️ Error during shutdown:', err?.message || err);
-    process.exit(1);
-  }
+/* -------------------- export a direct send for server dispatch -------------------- */
+export async function sendWhatsAppDriverMessage(toPhoneOrJid, text) {
+  return sendText(toPhoneOrJid, text);
 }
-
-process.on('SIGINT',  () => gracefulExit('SIGINT'));
-process.on('SIGTERM', () => gracefulExit('SIGTERM'));
-process.once('SIGUSR2', async () => { await gracefulExit('SIGUSR2'); process.kill(process.pid, 'SIGUSR2'); });

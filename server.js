@@ -298,8 +298,68 @@ app.get('/driver-qrcode', async (req, res) => {
   }
 });
 
+// Alias QR page (nice pretty page that auto-refreshes)
+app.get('/driver-wa-qr', async (req, res) => {
+  if (isWhatsAppDriverConnected()) return res.send('<h2>✅ Driver WhatsApp is connected.</h2>');
+  try {
+    const dataUrl = await waitForDriverQrDataUrl(25000); // waits up to 25s
+    res.type('html').send(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Driver WhatsApp QR</title>
+          <style>
+            body{font-family:sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
+            .wrap{max-width:520px;text-align:center}
+            img{width:100%;height:auto;background:#fff;padding:12px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
+            .hint{opacity:.75;margin-top:12px}
+          </style>
+        </head>
+        <body>
+          <div class="wrap">
+            <h2>Scan to sign in (Driver WA)</h2>
+            <img src="${dataUrl}" alt="WhatsApp QR" />
+            <div class="hint">Open WhatsApp → Linked devices → Link a device.</div>
+            <script>setTimeout(() => location.reload(), 20000);</script>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (e) {
+    res.type('html').send(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Driver WhatsApp QR</title>
+          <style>
+            body{font-family:sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
+            .wrap{max-width:520px;text-align:center}
+          </style>
+        </head>
+        <body>
+          <div class="wrap">
+            <h2>Preparing QR…</h2>
+            <p>Please keep this page open.</p>
+            <script>setTimeout(() => location.reload(), 3000);</script>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+});
+
+// Existing status endpoint
 app.get('/driver-wa/status', (req, res) => {
   res.json({ connected: isWhatsAppDriverConnected(), state: getDriverConnectionStatus() });
+});
+
+// Alias status for API-style path
+app.get('/api/wa-driver/status', (req, res) => {
+  res.json({ status: getDriverConnectionStatus(), connected: isWhatsAppDriverConnected() });
 });
 
 /* ---------------- Legacy rider endpoint ---------------- */
