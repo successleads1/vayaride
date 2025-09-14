@@ -104,7 +104,6 @@ async function sendText(jidOrPhone, text) {
   }
 
   if (!jid) {
-    // Don’t throw here; just log to avoid recursive error handling loops
     logger.warn('[WA-DRIVER] sendText skipped (invalid JID/phone): %s', jidOrPhone);
     return;
   }
@@ -113,7 +112,7 @@ async function sendText(jidOrPhone, text) {
 }
 
 async function sendButtons(jid, body, rideId) {
-  // Use old-style buttons (still widely supported). If they fail, caller should fallback to text.
+  // Old-style buttons; if they fail, caller falls back to text.
   const buttonsMessage = {
     text: body,
     buttons: [
@@ -127,8 +126,8 @@ async function sendButtons(jid, body, rideId) {
 
 function onlineKeyboardText(isOnline) {
   return isOnline
-    ? '🔴 *Go OFFLINE* to stop receiving jobs.'
-    : '🟢 *Go ONLINE* to start receiving jobs.';
+    ? '🔴 *2 — Go OFFLINE* to stop receiving jobs.'
+    : '🟢 *1 — Go ONLINE* to start receiving jobs.';
 }
 
 function fmtKm(meters) { return `${(Number(meters || 0) / 1000).toFixed(2)} km`; }
@@ -146,7 +145,6 @@ function paymentEmoji(method) {
 
 /* -------------------- DB helpers -------------------- */
 async function setAvailabilityByJid(jid, isOnline) {
-  // Find driver by phone match (recommended)
   const phone = phoneFromJid(jid);
   let driver = null;
 
@@ -168,7 +166,6 @@ async function findDriverByJid(jid) {
 }
 
 async function linkDriverByEmail(email, jid) {
-  // convenience: LINK email@example.com to bind their WhatsApp number to their driver record, if missing
   const phone = phoneFromJid(jid);
   if (!phone) return null;
 
@@ -213,7 +210,6 @@ function setPendingFor(jid, rideId) {
   const short = String(rideId).slice(-4).toLowerCase();
   const map = pendingShortByJid.get(jid) || new Map();
   map.set(short, rideId);
-  // Keep only last ~10 shorts per jid
   if (map.size > 10) {
     const firstKey = map.keys().next().value;
     map.delete(firstKey);
@@ -248,7 +244,9 @@ async function handleTextMessage(jid, raw) {
         'I couldn’t find your driver profile for this WhatsApp number.\n' +
         '• *Just type your email address* to link your account (example: driver@email.com)\n' +
         `• Or register here:\n${PUBLIC_URL}/driver/register\n\n` +
-        'Once linked, type *Go ONLINE* to start receiving jobs.'
+        'Once linked, reply:\n' +
+        '1 — Go ONLINE\n' +
+        '2 — Go OFFLINE'
       );
       return;
     }
@@ -258,8 +256,10 @@ async function handleTextMessage(jid, raw) {
       `👋 Hi ${driver.name || ''}\n` +
       `Status: *${driver.isAvailable ? 'ONLINE' : 'OFFLINE'}*\n` +
       `${onlineKeyboardText(!!driver.isAvailable)}\n\n` +
-      'Commands:\n' +
-      '• *Go ONLINE* / *Go OFFLINE*\n' +
+      'Quick actions:\n' +
+      '1 — Go ONLINE\n' +
+      '2 — Go OFFLINE\n\n' +
+      'Other commands:\n' +
       '• *STATS*\n' +
       '• *WHOAMI*\n' +
       (pending ? `• For the latest request: reply *ACCEPT* or *IGNORE* (or include code *${short}*)` : '')
@@ -273,7 +273,7 @@ async function handleTextMessage(jid, raw) {
     const email = emailMatch[0];
     const linked = await linkDriverByEmail(email, jid);
     if (linked) {
-      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow *Go ONLINE* to start receiving jobs.`);
+      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow send *1* to go ONLINE and start receiving jobs.`);
     } else {
       await sendText(jid, `❌ Couldn’t find a driver with email: ${email}\nPlease make sure you registered on the website.`);
     }
@@ -285,15 +285,18 @@ async function handleTextMessage(jid, raw) {
     const email = txt.slice(5).trim();
     const linked = await linkDriverByEmail(email, jid);
     if (linked) {
-      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow *Go ONLINE* to start receiving jobs.`);
+      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow send *1* to go ONLINE and start receiving jobs.`);
     } else {
       await sendText(jid, `❌ Couldn’t find a driver with email: ${email}\nPlease make sure you registered on the website.`);
     }
     return;
   }
 
-  // availability — accept “go online/offline”, plain “online/offline”, and /online,/offline
-  if (/^\s*(go\s+)?online\b/.test(lower) || lower === '/online') {
+  // normalize for simple numeric shortcuts
+  const cleaned = lower.replace(/[\s().:-]+/g, ' ').trim();
+
+  // availability — accept: "1", "go online", "online", "/online"
+  if (cleaned === '1' || cleaned === 'online' || cleaned === '/online' || cleaned.startsWith('go online')) {
     const driver = await setAvailabilityByJid(jid, true);
     if (!driver) { await sendText(jid, '❌ Driver profile not found. Please send your *email address* to link.'); return; }
     await sendText(
@@ -303,14 +306,16 @@ async function handleTextMessage(jid, raw) {
       '   • Tap 📎 (attach) → *Location* → *Share live location* → choose *Until turned off*.\n' +
       '   • Keep live location ON while you are online.\n' +
       'You can also send a one-off location, but *live location* is best.\n\n' +
-      'To stop, type *Go OFFLINE*.'
+      'To stop, send *2* (Go OFFLINE).'
     );
     return;
   }
-  if (/^\s*(go\s+)?offline\b/.test(lower) || lower === '/offline') {
+
+  // availability — accept: "2", "go offline", "offline", "/offline"
+  if (cleaned === '2' || cleaned === 'offline' || cleaned === '/offline' || cleaned.startsWith('go offline') || cleaned.startsWith('go off line')) {
     const driver = await setAvailabilityByJid(jid, false);
     if (!driver) { await sendText(jid, '❌ Driver profile not found.'); return; }
-    await sendText(jid, '🔴 You are now *OFFLINE*.\nType *Go ONLINE* to start again.');
+    await sendText(jid, '🔴 You are now *OFFLINE*.\nSend *1* to go ONLINE again.');
     return;
   }
 
@@ -369,9 +374,11 @@ async function handleTextMessage(jid, raw) {
   // unrecognized → beginner-friendly help
   await sendText(
     jid,
-    '🤖 Commands:\n' +
+    '🤖 Quick actions:\n' +
+    '1 — Go ONLINE\n' +
+    '2 — Go OFFLINE\n\n' +
+    'Other commands:\n' +
     '• *Type your email address* to link your account (e.g. name@example.com)\n' +
-    '• *Go ONLINE* / *Go OFFLINE*\n' +
     '• *STATS*, *WHOAMI*, *ACCEPT*, *IGNORE*\n' +
     'Tip: Keep *Share live location* on while ONLINE.'
   );
