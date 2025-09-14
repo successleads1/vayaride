@@ -127,8 +127,8 @@ async function sendButtons(jid, body, rideId) {
 
 function onlineKeyboardText(isOnline) {
   return isOnline
-    ? '🔴 Reply *OFFLINE* to stop receiving jobs.'
-    : '🟢 Reply *ONLINE* to start receiving jobs.';
+    ? '🔴 *Go OFFLINE* to stop receiving jobs.'
+    : '🟢 *Go ONLINE* to start receiving jobs.';
 }
 
 function fmtKm(meters) { return `${(Number(meters || 0) / 1000).toFixed(2)} km`; }
@@ -233,6 +233,8 @@ function resolveRideIdFromInput(jid, maybeCode) {
 }
 
 /* -------------------- Inbound handlers -------------------- */
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+
 async function handleTextMessage(jid, raw) {
   const txt = String(raw || '').trim();
   const lower = txt.toLowerCase();
@@ -243,10 +245,10 @@ async function handleTextMessage(jid, raw) {
     if (!driver) {
       await sendText(jid,
         '👋 *VayaRide Driver*\n' +
-        'I could not find your driver profile by this WhatsApp number.\n' +
-        '• If you are registered, reply: *LINK your@email.com*\n' +
-        '• Otherwise register here:\n' +
-        `${PUBLIC_URL}/driver/register`
+        'I couldn’t find your driver profile for this WhatsApp number.\n' +
+        '• *Just type your email address* to link your account (example: driver@email.com)\n' +
+        `• Or register here:\n${PUBLIC_URL}/driver/register\n\n` +
+        'Once linked, type *Go ONLINE* to start receiving jobs.'
       );
       return;
     }
@@ -257,7 +259,7 @@ async function handleTextMessage(jid, raw) {
       `Status: *${driver.isAvailable ? 'ONLINE' : 'OFFLINE'}*\n` +
       `${onlineKeyboardText(!!driver.isAvailable)}\n\n` +
       'Commands:\n' +
-      '• *ONLINE* / *OFFLINE*\n' +
+      '• *Go ONLINE* / *Go OFFLINE*\n' +
       '• *STATS*\n' +
       '• *WHOAMI*\n' +
       (pending ? `• For the latest request: reply *ACCEPT* or *IGNORE* (or include code *${short}*)` : '')
@@ -265,36 +267,50 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // link by email
-  if (lower.startsWith('link ')) {
-    const email = txt.slice(5).trim();
+  // allow plain email anywhere in the message to link
+  const emailMatch = txt.match(EMAIL_RE);
+  if (emailMatch && !lower.startsWith('accept') && !lower.startsWith('ignore')) {
+    const email = emailMatch[0];
     const linked = await linkDriverByEmail(email, jid);
     if (linked) {
-      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nReply *ONLINE* to start receiving jobs.`);
+      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow *Go ONLINE* to start receiving jobs.`);
     } else {
-      await sendText(jid, `❌ Could not find a driver with email: ${email}\nMake sure you registered on the website.`);
+      await sendText(jid, `❌ Couldn’t find a driver with email: ${email}\nPlease make sure you registered on the website.`);
     }
     return;
   }
 
-  // availability
-  if (lower === 'online' || lower === '/online') {
+  // legacy: explicit "LINK you@example.com" still works
+  if (lower.startsWith('link ')) {
+    const email = txt.slice(5).trim();
+    const linked = await linkDriverByEmail(email, jid);
+    if (linked) {
+      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow *Go ONLINE* to start receiving jobs.`);
+    } else {
+      await sendText(jid, `❌ Couldn’t find a driver with email: ${email}\nPlease make sure you registered on the website.`);
+    }
+    return;
+  }
+
+  // availability — accept “go online/offline”, plain “online/offline”, and /online,/offline
+  if (/^\s*(go\s+)?online\b/.test(lower) || lower === '/online') {
     const driver = await setAvailabilityByJid(jid, true);
-    if (!driver) { await sendText(jid, '❌ Driver profile not found. Reply *LINK your@email.com* to connect.'); return; }
+    if (!driver) { await sendText(jid, '❌ Driver profile not found. Please send your *email address* to link.'); return; }
     await sendText(
       jid,
       '🟢 You are now *ONLINE*.\n' +
       '➡️ Please *Share Live Location* so we can keep tracking your position for jobs:\n' +
       '   • Tap 📎 (attach) → *Location* → *Share live location* → choose *Until turned off*.\n' +
       '   • Keep live location ON while you are online.\n' +
-      'You can also send a one-off location, but *live location* is best.'
+      'You can also send a one-off location, but *live location* is best.\n\n' +
+      'To stop, type *Go OFFLINE*.'
     );
     return;
   }
-  if (lower === 'offline' || lower === '/offline') {
+  if (/^\s*(go\s+)?offline\b/.test(lower) || lower === '/offline') {
     const driver = await setAvailabilityByJid(jid, false);
     if (!driver) { await sendText(jid, '❌ Driver profile not found.'); return; }
-    await sendText(jid, '🔴 You are now *OFFLINE*.\nReply *ONLINE* to start again.');
+    await sendText(jid, '🔴 You are now *OFFLINE*.\nType *Go ONLINE* to start again.');
     return;
   }
 
@@ -350,8 +366,15 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // unrecognized → quick help
-  await sendText(jid, '🤖 Commands: *ONLINE*, *OFFLINE*, *STATS*, *WHOAMI*, *ACCEPT*, *IGNORE* (optionally with code like *6869*).\nTip: Keep *Share live location* on while online.');
+  // unrecognized → beginner-friendly help
+  await sendText(
+    jid,
+    '🤖 Commands:\n' +
+    '• *Type your email address* to link your account (e.g. name@example.com)\n' +
+    '• *Go ONLINE* / *Go OFFLINE*\n' +
+    '• *STATS*, *WHOAMI*, *ACCEPT*, *IGNORE*\n' +
+    'Tip: Keep *Share live location* on while ONLINE.'
+  );
 }
 
 async function upsertDriverLocationByPhone(phone, lat, lng) {
