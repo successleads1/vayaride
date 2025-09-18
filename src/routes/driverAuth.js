@@ -27,7 +27,7 @@ const upload = multer({
   }
 });
 
-/* ---------- Helpers ---------- */
+/* ---------- Guards ---------- */
 const ensureAuth = (req, res, next) => {
   if (req.isAuthenticated && req.isAuthenticated()) return next();
   return res.redirect('/driver/login');
@@ -36,11 +36,36 @@ const ensureGuest = (req, res, next) => {
   if (req.isAuthenticated && req.isAuthenticated()) return res.redirect('/driver');
   return next();
 };
+
+/* ---------- Helpers ---------- */
 const getPublicUrl = (req) =>
   (process.env.PUBLIC_URL && process.env.PUBLIC_URL.replace(/\/$/, '')) ||
   `${req.protocol}://${req.get('host')}`;
 
-/** Compress only images */
+function renderError(res, view, msg, extras = {}) {
+  const status = extras.statusCode || 400;
+  const payload = { error: msg, ...extras };
+  return res.status(status).render(view, payload);
+}
+
+/** Normalize SA numbers to E.164 (+27XXXXXXXXX). Returns null if invalid. */
+function normalizePhoneZA(input = '') {
+  const d = String(input).replace(/\D/g, ''); // digits only
+  if (!d) return null;
+  if (d.length === 10 && d.startsWith('0')) return `+27${d.slice(1)}`;
+  if (d.length === 11 && d.startsWith('27')) return `+${d}`;
+  // Sometimes users paste 9 digits (missing the leading 0)
+  if (d.length === 9) return `+27${d}`;
+  // Already E.164 with plus? (rare here because we stripped non-digits)
+  return null;
+}
+
+/** Match your front-end <input pattern> exactly */
+function isStrongPassword(pw = '') {
+  return /(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,}/.test(String(pw));
+}
+
+/** Compress only images before Cloudinary upload */
 async function compressIfImage(file) {
   if (!file || !file.mimetype?.startsWith('image/')) return file.buffer;
   const out = await sharp(file.buffer)
@@ -54,27 +79,17 @@ function uploadBufferToCloudinary(buffer, folder, filenameHint) {
   return new Promise((resolve, reject) => {
     const passthrough = new stream.PassThrough();
     passthrough.end(buffer);
-    const options = { folder, resource_type: 'auto', public_id: filenameHint?.replace(/\W+/g, '_') || undefined };
-    const cldStream = cloudinary.uploader.upload_stream(options, (err, result) => err ? reject(err) : resolve(result));
+    const options = {
+      folder,
+      resource_type: 'auto',
+      public_id: filenameHint?.replace(/\W+/g, '_') || undefined
+    };
+    const cldStream = cloudinary.uploader.upload_stream(
+      options,
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
     passthrough.pipe(cldStream);
   });
-}
-
-/* ---------- Phone + password utilities ---------- */
-/** Normalize SA numbers to E.164 (+27XXXXXXXXX). Returns null if invalid. */
-function normalizePhoneZA(input = '') {
-  const d = String(input).replace(/\D/g, '');            // digits only
-  if (!d) return null;
-  // Cases: 0XXXXXXXXX, 27XXXXXXXXX, or already +27XXXXXXXXX (the + is removed above)
-  if (d.length === 10 && d.startsWith('0')) return `+27${d.slice(1)}`;
-  if (d.length === 11 && d.startsWith('27')) return `+${d}`;
-  // Some users paste 9 digits without leading 0 — assume mobile and prefix +27
-  if (d.length === 9) return `+27${d}`;
-  return null;
-}
-/** Basic strong password guard (8+ length). Adjust if you want stricter. */
-function isStrongPassword(pw = '') {
-  return String(pw).length >= 8;
 }
 
 /* ---------- Docs form fields ---------- */
@@ -92,6 +107,7 @@ const DOC_FIELDS = [
 ];
 const DOC_KEYS = DOC_FIELDS.map(f => f.name);
 
+/* ---------- Router ---------- */
 const router = express.Router();
 
 /* ---------------- Register ---------------- */
@@ -105,49 +121,53 @@ router.get('/register', ensureGuest, (req, res) => {
 
 router.post('/register', ensureGuest, async (req, res) => {
   try {
-    // normalize inputs
     const nameRaw   = (req.body.name || '').trim();
     const emailRaw  = (req.body.email || '').trim().toLowerCase();
     const phoneRaw  = (req.body.phone || '').trim();
     const password  = String(req.body.password || '');
     const confirm   = String(req.body.confirm || '');
     const vehicleTypeRaw = String(req.body.vehicleType || '').toLowerCase();
-
     const publicUrl = getPublicUrl(req);
+
     const keep = { name: nameRaw, email: emailRaw, phone: phoneRaw, vehicleType: vehicleTypeRaw };
 
-    // validate required
+    // required checks
     if (!nameRaw || !emailRaw || !phoneRaw || !password || !confirm || !vehicleTypeRaw) {
-      return res.status(200).render('driver/register', { error: 'Missing fields', publicUrl, form: keep });
+      return renderError(res, 'driver/register', 'Please fill in all fields.', { publicUrl, form: keep });
     }
     if (password !== confirm) {
-      return res.status(200).render('driver/register', { error: 'Passwords do not match', publicUrl, form: keep });
+      return renderError(res, 'driver/register', 'Passwords do not match', { publicUrl, form: keep });
     }
     if (!isStrongPassword(password)) {
-      return res.status(200).render('driver/register', { error: 'Use at least 8 characters for your password', publicUrl, form: keep });
+      return renderError(
+        res,
+        'driver/register',
+        'Password must be 8+ chars with upper, lower, number & special (no spaces).',
+        { publicUrl, form: keep }
+      );
     }
 
-    // phone normalize + validate
     const phoneE164 = normalizePhoneZA(phoneRaw);
     if (!phoneE164) {
-      return res.status(200).render('driver/register', { error: 'Enter a valid South African phone number', publicUrl, form: keep });
+      return renderError(res, 'driver/register', 'Enter a valid South African phone number', { publicUrl, form: keep });
     }
 
-    // allowlisted vehicle types
     const allowedVehicles = ['normal', 'comfort', 'luxury', 'xl'];
     if (!allowedVehicles.includes(vehicleTypeRaw)) {
-      return res.status(200).render('driver/register', { error: 'Invalid vehicle type', publicUrl, form: keep });
+      return renderError(res, 'driver/register', 'Invalid vehicle type', { publicUrl, form: keep });
     }
 
-    // unique email/phone
-    const existing = await Driver.findOne({ $or: [{ email: emailRaw }, { phone: phoneE164 }] });
+    // unique checks
+    const existing = await Driver.findOne({ $or: [{ email: emailRaw }, { phone: phoneE164 }] })
+      .select('_id email phone')
+      .lean();
     if (existing) {
       const msg = existing.email === emailRaw ? 'Email already in use' : 'Phone already in use';
-      return res.status(200).render('driver/register', { error: msg, publicUrl, form: keep });
+      return renderError(res, 'driver/register', msg, { publicUrl, form: keep, statusCode: 409 });
     }
 
-    // hash + create
-    const passwordHash = await bcrypt.hash(password, 10);
+    // create
+    const passwordHash = await bcrypt.hash(password, 12);
     const created = await Driver.create({
       name: nameRaw,
       email: emailRaw,
@@ -158,14 +178,12 @@ router.post('/register', ensureGuest, async (req, res) => {
       isAvailable: false
     });
 
-    // send welcome email (non-fatal)
+    // emails (non-fatal)
     try {
       await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw });
     } catch (e) {
       console.error('Welcome email failed:', e?.message || e);
     }
-
-    // notify admin (NOW includes phone)
     try {
       await sendAdminNewDriverAlert({
         name: nameRaw,
@@ -179,19 +197,33 @@ router.post('/register', ensureGuest, async (req, res) => {
       console.error('Admin alert failed:', e?.message || e);
     }
 
-    // redirect to login with email prefilled
-    return res.redirect(`/driver/login?email=${encodeURIComponent(emailRaw)}`);
+    // success → login
+    return res.redirect(303, `/driver/login?justRegistered=1&email=${encodeURIComponent(emailRaw)}`);
   } catch (err) {
+    if (err && err.code === 11000) {
+      const publicUrl = getPublicUrl(req);
+      const which = err.keyPattern?.email ? 'Email' : err.keyPattern?.phone ? 'Phone' : 'Account';
+      return renderError(res, 'driver/register', `${which} already exists`, {
+        publicUrl,
+        form: {
+          name: (req.body?.name || '').trim(),
+          email: (req.body?.email || '').trim().toLowerCase(),
+          phone: (req.body?.phone || '').trim(),
+          vehicleType: (req.body?.vehicleType || '').trim().toLowerCase()
+        },
+        statusCode: 409
+      });
+    }
     console.error('Register error:', err?.message || err);
-    return res.status(500).render('driver/register', {
-      error: 'Server error',
+    return renderError(res, 'driver/register', 'Server error', {
       publicUrl: getPublicUrl(req),
       form: {
         name: (req.body?.name || '').trim(),
         email: (req.body?.email || '').trim().toLowerCase(),
         phone: (req.body?.phone || '').trim(),
         vehicleType: (req.body?.vehicleType || '').trim().toLowerCase()
-      }
+      },
+      statusCode: 500
     });
   }
 });
@@ -203,6 +235,7 @@ router.get('/login', ensureGuest, (req, res) => {
     publicUrl: getPublicUrl(req)
   });
 });
+
 router.post(
   '/login',
   ensureGuest,
@@ -222,6 +255,7 @@ router.get('/', ensureAuth, async (req, res) => {
 
 /* ---------------- Upload Docs ---------------- */
 router.get('/upload-docs', ensureAuth, (req, res) => res.redirect('/driver#docsForm'));
+
 router.post('/upload-docs', ensureAuth, upload.fields(DOC_FIELDS), async (req, res) => {
   try {
     const driver = await Driver.findById(req.user._id);
@@ -261,10 +295,16 @@ function extractCloudinaryInfo(url) {
   try {
     const u = new URL(url);
     const parts = u.pathname.split('/');
-    const resourceType = parts[2] || 'image';
+
+    const resourceType = parts[2] || 'image'; // image/video/raw
     const uploadIdx = parts.indexOf('upload');
     let after = parts.slice(uploadIdx + 1).join('/');
-    if (after.startsWith('v') && after[1] >= '0' && after[1] <= '9') after = after.split('/').slice(1).join('/');
+
+    // remove version v123...
+    if (after.startsWith('v') && /\dv\d*/.test(after.slice(0, 6))) {
+      after = after.split('/').slice(1).join('/');
+    }
+
     const last = after.split('/').pop() || '';
     const withoutExt = last.includes('.') ? last.substring(0, last.lastIndexOf('.')) : last;
     const before = after.split('/').slice(0, -1).join('/');
@@ -275,6 +315,7 @@ function extractCloudinaryInfo(url) {
     return { publicId: null, resourceType: 'image' };
   }
 }
+
 router.post('/delete-doc', ensureAuth, async (req, res) => {
   try {
     const key = String(req.body.key || '');
@@ -295,7 +336,8 @@ router.post('/delete-doc', ensureAuth, async (req, res) => {
       catch (e) { console.warn('Cloudinary destroy failed (continuing):', e?.message || e); }
     }
 
-    driver.documents.set ? driver.documents.set(key, undefined) : delete driver.documents[key];
+    // Remove from doc
+    if (driver.documents?.set) driver.documents.set(key, undefined);
     await Driver.updateOne({ _id: driver._id }, { $unset: { [`documents.${key}`]: "" } });
 
     return res.redirect('/driver?ok=' + encodeURIComponent(`${key} deleted`) + '#docs');
