@@ -43,7 +43,6 @@ import {
   getConnectionStatus,
   sendWhatsAppMessage,
   resetWhatsAppSession,
-  notifyWhatsAppRiderToRate
 } from './src/bots/whatsappBot.js';
 
 /* ---- Bots (WhatsApp: Drivers) ---- */
@@ -146,8 +145,8 @@ await ensureSeedAdmin();
 initWhatsappBot();            // WA for Riders (existing)
 initWhatsappDriverBot();      // WA for Drivers (new)
 
-const riderBot = initRiderBot(io);
-const driverBot = initDriverBot(io);
+const riderBot = initRiderBot({ io });
+const driverBot = initDriverBot({ io });
 console.log('🤖 Rider bot initialized');
 console.log('🚗 Driver bot initialized');
 
@@ -168,6 +167,117 @@ async function logActivity({ rideId, type, message, actorType = 'system', actorI
   } catch (e) {
     console.warn('logActivity failed:', e?.message || e);
   }
+}
+
+/* ---------------- Contact helpers (Name & Phone) ---------------- */
+function jidToPhone(jid) {
+  if (!jid) return null;
+  const core = String(jid).split('@')[0] || '';
+  const digits = core.replace(/[^\d+]/g, '');
+  if (!digits) return null;
+  return digits.startsWith('+') ? digits : `+${digits}`;
+}
+function normalizePhone(x) {
+  if (!x) return null;
+  const digits = String(x).replace(/[^\d+]/g, '');
+  if (!digits) return null;
+  return digits.startsWith('+') ? digits : `+${digits}`;
+}
+function pickPhoneLike(obj = {}) {
+  return (
+    obj.phone ||
+    obj.phoneNumber ||
+    obj.mobile ||
+    obj.msisdn ||
+    (obj.waJid ? jidToPhone(obj.waJid) : null) ||
+    null
+  );
+}
+
+/** ✅ Backfill rider.phone/msisdn if we can infer it (one-time fix for older riders) */
+async function backfillRiderPhoneIfMissing({ rider, ride }) {
+  try {
+    if (!rider?._id) return null;
+    const existing = pickPhoneLike(rider);
+    if (existing) return existing;
+
+    // Try from ride first (explicit fields), then from JIDs
+    let candidate =
+      normalizePhone(ride?.riderPhone || ride?.riderPhoneNumber || ride?.riderMsisdn || ride?.riderMobile) ||
+      (ride?.riderWaJid ? jidToPhone(ride.riderWaJid) : null) ||
+      (rider.waJid ? jidToPhone(rider.waJid) : null);
+
+    if (!candidate) return null;
+
+    await Rider.updateOne(
+      { _id: rider._id },
+      { $set: { phone: candidate, msisdn: candidate } }
+    );
+
+    // Log once so you can see it happening in the admin feed
+    try {
+      await logActivity({
+        rideId: ride?._id || null,
+        type: 'datafix',
+        message: `Backfilled rider phone ${candidate}`,
+        actorType: 'system',
+        actorId: String(rider._id),
+        meta: { riderId: String(rider._id) }
+      });
+    } catch {}
+
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveRiderContactFromRide(ride) {
+  // Try very hard to get the rider's phone:
+  // 1) Prefer Rider doc (phone fields or waJid)
+  // 2) Fallback to fields present on the Ride (riderWaJid / riderPhone / etc.)
+  // 3) If we find a phone and Rider is missing one, persist it (self-heal)
+  if (!ride) return { name: 'Rider', phone: null, doc: null };
+
+  let rider = null;
+  const ors = [];
+  if (ride.riderChatId != null) ors.push({ chatId: Number(ride.riderChatId) }, { chatId: String(ride.riderChatId) });
+  if (ride.riderWaJid) ors.push({ waJid: ride.riderWaJid });
+  if (ors.length) rider = await Rider.findOne({ $or: ors }).lean();
+
+  const name = rider?.name || 'Rider';
+
+  // prefer phone from Rider doc
+  let phone = pickPhoneLike(rider);
+
+  // fallbacks from Ride fields if still missing
+  if (!phone) phone = normalizePhone(ride.riderPhone || ride.riderPhoneNumber || ride.riderMsisdn || ride.riderMobile);
+  if (!phone && ride.riderWaJid) phone = jidToPhone(ride.riderWaJid);
+
+  // ✅ If we found a phone but Rider is missing one, backfill it for next time
+  if (rider && !pickPhoneLike(rider) && phone) {
+    try { await Rider.updateOne({ _id: rider._id }, { $set: { phone, msisdn: phone } }); } catch {}
+  }
+
+  // Also try a best-effort backfill if we couldn't resolve above (logs a datafix entry)
+  if (rider && !phone) {
+    const fixed = await backfillRiderPhoneIfMissing({ rider, ride });
+    if (fixed) phone = fixed;
+  }
+
+  return { name, phone, doc: rider };
+}
+
+async function resolveDriverContact({ driverId, driverChatId } = {}) {
+  let drv = null;
+  if (driverId) drv = await Driver.findById(driverId).lean();
+  if (!drv && driverChatId != null) drv = await Driver.findOne({ chatId: Number(driverChatId) }).lean();
+  const name = drv?.name || drv?.email || 'Driver';
+  const phone = (
+    drv?.phone || drv?.phoneNumber || drv?.mobile || drv?.msisdn ||
+    (drv?.waJid ? jidToPhone(drv.waJid) : null)
+  ) || null;
+  return { name, phone, doc: drv };
 }
 
 /* ---------------- Basic pages / auth ---------------- */
@@ -221,6 +331,16 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       ? { avg: Number(starsAgg[0].avg.toFixed(2)), count: starsAgg[0].count }
       : { avg: null, count: 0 };
 
+    // Try to backfill a missing phone from the rider's JID even here (no ride context)
+    let phoneOut = pickPhoneLike(rider) || '';
+    if (!phoneOut && rider.waJid) {
+      const fromJid = jidToPhone(rider.waJid);
+      if (fromJid) {
+        try { await Rider.updateOne({ _id: rider._id }, { $set: { phone: fromJid, msisdn: fromJid } }); } catch {}
+        phoneOut = fromJid;
+      }
+    }
+
     res.set('Cache-Control', 'no-store');
     return res.json({
       platform: rider.platform || null,
@@ -228,6 +348,7 @@ app.get('/api/rider-by-token/:token', async (req, res) => {
       waJid: rider.waJid || null,
       name: rider.name || '',
       email: rider.email || '',
+      phone: phoneOut,
       credit: rider.credit ?? 0,
       trips: tripsCompleted,
       lastPayment,
@@ -298,11 +419,11 @@ app.get('/driver-qrcode', async (req, res) => {
   }
 });
 
-// Alias QR page (nice pretty page that auto-refreshes)
+// Alias QR page (auto-refresh)
 app.get('/driver-wa-qr', async (req, res) => {
   if (isWhatsAppDriverConnected()) return res.send('<h2>✅ Driver WhatsApp is connected.</h2>');
   try {
-    const dataUrl = await waitForDriverQrDataUrl(25000); // waits up to 25s
+    const dataUrl = await waitForDriverQrDataUrl(25000);
     res.type('html').send(`
       <!doctype html>
       <html>
@@ -366,7 +487,7 @@ app.get('/api/wa-driver/status', (req, res) => {
 app.get('/api/rider/:chatId', async (req, res) => {
   const rider = await Rider.findOne({ chatId: req.params.chatId });
   if (!rider) return res.status(404).json({ error: 'Rider not found' });
-  res.json({ name: rider.name, email: rider.email, credit: rider.credit, trips: rider.trips || 0 });
+  res.json({ name: rider.name, email: rider.email, phone: pickPhoneLike(rider) || '', credit: rider.credit, trips: rider.trips || 0 });
 });
 
 /* ---------------- Telegram webhooks if used ---------------- */
@@ -414,6 +535,9 @@ app.get('/api/ride/:rideId', async (req, res) => {
       if (drv && typeof drv.chatId === 'number') driverChatId = drv.chatId;
     }
 
+    const riderContact = await resolveRiderContactFromRide(ride);
+    const driverContact = await resolveDriverContact({ driverId: ride.driverId, driverChatId });
+
     res.json({
       pickup: ride.pickup,
       destination: ride.destination,
@@ -421,7 +545,9 @@ app.get('/api/ride/:rideId', async (req, res) => {
       driverChatId,
       pickedAt: ride.pickedAt || ride.startedAt || null,
       completedAt: ride.completedAt || null,
-      createdAt: ride.createdAt
+      createdAt: ride.createdAt,
+      rider: { name: riderContact.name, phone: riderContact.phone || null },
+      driver: { name: driverContact.name, phone: driverContact.phone || null }
     });
   } catch {
     res.status(500).json({ error: 'Server error' });
@@ -598,11 +724,16 @@ async function dispatchToNearestDriver({ rideId, excludeDriverIds = [] }) {
     meta: { driverId: String(chosen._id), driverChatId: chosen.chatId ?? null }
   });
 
+  // include rider contact info (phone fallback-aware + backfill if missing)
+  const riderContact = await resolveRiderContactFromRide(ride);
+  const riderLine = `• Rider: ${riderContact.name}${riderContact.phone ? ` (${riderContact.phone})` : ''}`;
+
   const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
   const text =
     `🚗 <b>New Ride Request</b>\n\n` +
     `• Vehicle: <b>${(ride.vehicleType || 'normal').toUpperCase()}</b>\n` +
     (ride.estimate ? `• Estimate: <b>R${ride.estimate}</b>\n` : '') +
+    `${riderLine}\n` +
     `• Pickup: <a href="${toMap(ride.pickup)}">Open Map</a>\n` +
     `• Drop:   <a href="${toMap(ride.destination || ride.pickup)}">Open Map</a>\n\n` +
     `Accept to proceed.`;
@@ -622,9 +753,9 @@ async function dispatchToNearestDriver({ rideId, excludeDriverIds = [] }) {
     console.warn('Failed to DM driver request (Telegram):', e?.message || e);
   }
 
-  // WhatsApp DM to the driver (NEW) – only if driver has phone saved
+  // WhatsApp DM to the driver (NEW)
   try {
-    await waNotifyDriverNewRequest({ driver: chosen, ride });
+    await waNotifyDriverNewRequest({ driver: chosen, ride, riderContact });
   } catch (e) {
     console.warn('Failed to DM driver request (WhatsApp):', e?.message || e);
   }
@@ -658,7 +789,7 @@ driverEvents.on('ride:ignored', async ({ previousDriverId, ride }) => {
   }
 });
 
-/* ➕ When the driver accepts, send links */
+/* ➕ When the driver accepts, send links (now with counterpart contacts) */
 driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
   try {
     const ride = await Ride.findById(rideId);
@@ -681,15 +812,47 @@ driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
     const riderLink  = base;
     const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(driverId)}`;
 
-    try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, `🚗 Your ride is on the way. Track here:\n${riderLink}`); } catch {}
-    try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, `🚗 Your ride is on the way. Track here:\n${riderLink}`); } catch {}
-    try { await DB.sendMessage(driverId, `🗺️ Open the live trip map (shares your GPS):\n${driverLink}`); } catch {}
+    // Resolve both contacts (phone fallback-aware)
+    const riderContact = await resolveRiderContactFromRide(ride);
+    const driverContact = await resolveDriverContact({ driverId: ride.driverId, driverChatId: driverId });
+
+    const riderInfoLine =
+      `👤 <b>Driver:</b> ${driverContact.name}` +
+      (driverContact.phone ? ` (${driverContact.phone})` : '');
+
+    const driverInfoLine =
+      `👤 <b>Rider:</b> ${riderContact.name}` +
+      (riderContact.phone ? ` (${riderContact.phone})` : '');
+
+    try {
+      if (ride.riderChatId)
+        await RB.sendMessage(
+          ride.riderChatId,
+          `🚗 Your ride is on the way.\n${riderInfoLine}\n\nTrack here:\n${riderLink}`,
+          { parse_mode: 'HTML' }
+        );
+    } catch {}
+
+    try {
+      if (ride.riderWaJid)
+        await sendWhatsAppMessage(
+          ride.riderWaJid,
+          `🚗 Your ride is on the way.\nDriver: ${driverContact.name}${driverContact.phone ? ` (${driverContact.phone})` : ''}\nTrack: ${riderLink}`
+        );
+    } catch {}
+
+    try {
+      await DB.sendMessage(
+        driverId,
+        `🗺️ Trip accepted.\n${driverInfoLine}\n\nOpen the live trip map (shares your GPS):\n${driverLink}`,
+        { parse_mode: 'HTML' }
+      );
+    } catch {}
   } catch (e) {
     console.warn('ride:accepted handler failed:', e?.message || e);
   }
 });
 
-/* Arrived → notify + socket */
 driverEvents.on('ride:arrived', async ({ rideId, firstTime = false }) => {
   try {
     const ride = await Ride.findById(rideId);

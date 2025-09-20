@@ -36,10 +36,19 @@ const DriverSchema = new mongoose.Schema({
   email: { type: String, index: true, unique: true, sparse: true },
   passwordHash: { type: String },
 
-  // NEW: cellphone (unique, normalized to E.164 like +27xxxxxxxxx)
+  // cellphone (unique, normalized to E.164 like +27xxxxxxxxx)
   phone: { type: String, index: true, unique: true, sparse: true },
 
+  // Vehicle meta
   vehicleType: { type: String, enum: ['normal', 'comfort', 'luxury', 'xl'], default: 'normal' },
+
+  // NEW — driver-editable vehicle details
+  vehicleMake:  { type: String },
+  vehicleModel: { type: String },
+  vehicleColor: { type: String },
+  vehicleName:  { type: String }, // free-text alternative (e.g., "Toyota Corolla")
+  vehiclePlate: { type: String, index: true, sparse: true }, // not unique to avoid conflicts in dev
+
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
 
   chatId: Number,

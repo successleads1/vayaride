@@ -9,16 +9,20 @@ import Ride from '../models/Ride.js';
 import Rider from '../models/Rider.js';
 import { sendAdminEmailToDrivers } from '../services/mailer.js';
 
+// NEW: subscribe to driver events to announce acceptance to rider
+import { driverEvents } from './driverBot.js';
+import Driver from '../models/Driver.js'; // for driver lookup when sending driver card
+
 export const riderEvents = new EventEmitter();
 
-// ---- Singleton container (survives duplicate imports) ----
+/* ---------------- Singleton container ---------------- */
 if (!globalThis.__riderBotSingleton) {
   globalThis.__riderBotSingleton = { bot: null, wired: false, started: false };
 }
-
 let riderBot = globalThis.__riderBotSingleton.bot;
 let ioRef = null;
 
+/* ---------------- Env ---------------- */
 const MODE = process.env.TELEGRAM_MODE || 'polling'; // 'polling' | 'webhook'
 const token = process.env.TELEGRAM_RIDER_BOT_TOKEN;
 if (!token) throw new Error('TELEGRAM_RIDER_BOT_TOKEN is not defined in .env');
@@ -27,27 +31,23 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
 const RIDER_WEBHOOK_PATH = process.env.TELEGRAM_RIDER_WEBHOOK_PATH || '/telegram/rider';
 
 const SUPPORT_EMAIL = (process.env.SUPPORT_EMAIL || 'admin@vayaride.co.za').trim();
-const TG_HELPDESK_URL = (process.env.TELEGRAM_HELPDESK_URL || 'https://t.me/yourSupportBot').trim();
 
-// ✅ Force ZA by default; can override via env
+/* ---------------- Google Places (ZA bias) ---------------- */
 const GMAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || 'country:za';
 const GMAPS_LANGUAGE = process.env.GOOGLE_MAPS_LANGUAGE || 'en-ZA';
 const GMAPS_REGION = process.env.GOOGLE_MAPS_REGION || 'za';
-
-// South Africa centroid (for biasing)
 const ZA_CENTER = { lat: -28.4793, lng: 24.6727 };
-const ZA_RADIUS_M = 1_500_000; // ~1500km
+const ZA_RADIUS_M = 1_500_000;
 
-/* ---------- In-memory state per chat ---------- */
+/* ---------------- In-memory state ---------------- */
 const riderState = new Map();
 
-/* ---------- Utils ---------- */
+/* ---------------- Utils ---------------- */
 const crop = (s, n = 48) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '');
 const generatePIN = () => Math.floor(1000 + Math.random() * 9000).toString();
 const generateToken = () => crypto.randomBytes(24).toString('hex');
 
-/* ---------- Shortcut expansions (UCT/UWC/CPUT/etc.) ---------- */
 const ZA_SHORTCUTS = {
   uct: 'University of Cape Town',
   uwc: 'University of the Western Cape',
@@ -70,28 +70,43 @@ function boostToZA(raw = '') {
   if (q.length <= 5) return `${q} South Africa`;
   return q;
 }
-
-/* ---------- Looser address detector (accepts acronyms) ---------- */
 function isLikelyQuery(t) {
   if (!t) return false;
   const s = String(t).trim();
   if (!/[a-z]/i.test(s)) return false;
-  if (/\d/.test(s) || /\s/.test(s)) return true;     // street-like
-  if (s.length >= 3) return true;                    // short tokens like "uct"
-  if (ZA_SHORTCUTS[s.toLowerCase()]) return true;    // explicit shortcut
+  if (/\d/.test(s) || /\s/.test(s)) return true;
+  if (s.length >= 3) return true;
+  if (ZA_SHORTCUTS[s.toLowerCase()]) return true;
   return false;
 }
 
-/* ---------- Rating UI helper ---------- */
-function riderStarsKeyboard(rideId) {
-  const row = Array.from({ length: 5 }, (_, i) => {
-    const n = i + 1;
-    return { text: '★'.repeat(n), callback_data: `rate_driver:${rideId}:${n}` };
-  });
-  return { reply_markup: { inline_keyboard: [row] } };
+/* ---------------- NEW: formatter & map ---------------- */
+const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
+
+function vehicleTypeLabel(vt) {
+  if (vt === 'comfort') return 'Comfort';
+  if (vt === 'luxury') return 'Luxury';
+  if (vt === 'xl') return 'XL';
+  return 'Normal';
 }
 
-/* ---------- Google helpers (ZA-restricted) ---------- */
+function formatDriverCardForRider({ driver, ride }) {
+  const dPhone = driver?.phone || driver?.phoneNumber || driver?.mobile || driver?.msisdn || '—';
+  const carName = driver?.vehicleName || [driver?.vehicleMake, driver?.vehicleModel].filter(Boolean).join(' ');
+  const lines = [
+    '🚘 <b>Your Driver</b>',
+    `• Name: <b>${driver?.name || '—'}</b>`,
+    `• Phone: <b>${dPhone}</b>`,
+    `• Vehicle: <b>${carName || '—'}</b>${driver?.vehicleColor ? ` (${driver.vehicleColor})` : ''}`,
+    `• Plate: <b>${driver?.vehiclePlate || '—'}</b>`,
+    `• Type: <b>${vehicleTypeLabel(driver?.vehicleType || 'normal')}</b>`,
+  ];
+  if (ride?.pickup) lines.push(`• Pickup: <a href="${toMap(ride.pickup)}">map</a>`);
+  if (ride?.destination) lines.push(`• Drop: <a href="${toMap(ride.destination)}">map</a>`);
+  return lines.join('\n');
+}
+
+/* ---------------- Google helpers ---------------- */
 async function gmapsAutocomplete(input, { sessiontoken } = {}) {
   if (!GMAPS_KEY) return [];
   const expanded = expandShortcut(input);
@@ -100,9 +115,9 @@ async function gmapsAutocomplete(input, { sessiontoken } = {}) {
   const u = new URL('https://maps.googleapis.com/maps/api/place/autocomplete/json');
   u.searchParams.set('input', maybeBoosted);
   u.searchParams.set('key', GMAPS_KEY);
-  u.searchParams.set('components', GMAPS_COMPONENTS); // country:za
-  u.searchParams.set('language', GMAPS_LANGUAGE);     // en-ZA
-  u.searchParams.set('region', GMAPS_REGION);         // za
+  u.searchParams.set('components', GMAPS_COMPONENTS);
+  u.searchParams.set('language', GMAPS_LANGUAGE);
+  u.searchParams.set('region', GMAPS_REGION);
   u.searchParams.set('location', `${ZA_CENTER.lat},${ZA_CENTER.lng}`);
   u.searchParams.set('radius', String(ZA_RADIUS_M));
   u.searchParams.set('strictbounds', 'true');
@@ -111,11 +126,7 @@ async function gmapsAutocomplete(input, { sessiontoken } = {}) {
   try {
     const r = await fetch(u.toString());
     const j = await r.json();
-    if (j.status !== 'OK' && j.status !== 'ZERO_RESULTS') {
-      console.warn('gmapsAutocomplete status', j.status, j.error_message);
-    }
     let preds = Array.isArray(j.predictions) ? j.predictions : [];
-
     if (!preds.length && expanded === input) {
       const u2 = new URL(u);
       u2.searchParams.set('input', `${expanded} South Africa`);
@@ -124,12 +135,10 @@ async function gmapsAutocomplete(input, { sessiontoken } = {}) {
       preds = Array.isArray(j2.predictions) ? j2.predictions : [];
     }
     return preds;
-  } catch (e) {
-    console.warn('gmapsAutocomplete error', e?.message || e);
+  } catch {
     return [];
   }
 }
-
 async function gmapsPlaceLatLng(placeId, { sessiontoken } = {}) {
   if (!GMAPS_KEY) return null;
   const u = new URL('https://maps.googleapis.com/maps/api/place/details/json');
@@ -143,26 +152,17 @@ async function gmapsPlaceLatLng(placeId, { sessiontoken } = {}) {
   try {
     const r = await fetch(u.toString());
     const j = await r.json();
-    if (j.status !== 'OK') {
-      console.warn('gmapsPlaceLatLng status', j.status, j.error_message);
-      return null;
-    }
+    if (j.status !== 'OK') return null;
     const loc = j.result?.geometry?.location;
     if (!loc) return null;
     const addr = j.result?.formatted_address || j.result?.name || '';
-    return {
-      lat: Number(loc.lat),
-      lng: Number(loc.lng),
-      name: j.result?.name || '',
-      address: addr
-    };
-  } catch (e) {
-    console.warn('gmapsPlaceLatLng error', e?.message || e);
+    return { lat: Number(loc.lat), lng: Number(loc.lng), name: j.result?.name || '', address: addr };
+  } catch {
     return null;
   }
 }
 
-/* ---------- Dashboard link ---------- */
+/* ---------------- Dashboard link ---------------- */
 async function sendDashboardLink(chatId) {
   const dashboardToken = generateToken();
   const dashboardPin = generatePIN();
@@ -182,7 +182,7 @@ async function sendDashboardLink(chatId) {
   );
 }
 
-/* ---------- Live rider location ---------- */
+/* ---------------- Live rider location (for admin socket) ---------------- */
 async function emitRiderLocation(chatId, loc) {
   await Rider.findOneAndUpdate(
     { chatId },
@@ -192,7 +192,7 @@ async function emitRiderLocation(chatId, loc) {
   try { ioRef?.emit('rider:location', { chatId, location: loc }); } catch {}
 }
 
-/* ---------- Support helpers ---------- */
+/* ---------------- Support + menus ---------------- */
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -202,7 +202,6 @@ function mainMenuKeyboard() {
     ]
   };
 }
-
 async function triggerSupportEmail(chatId, context = 'Telegram rider support') {
   try {
     const rider = await Rider.findOne({ chatId }).lean().catch(() => null);
@@ -218,11 +217,8 @@ async function triggerSupportEmail(chatId, context = 'Telegram rider support') {
          <li><strong>Context:</strong> ${context}</li>
        </ul>`;
     await sendAdminEmailToDrivers(SUPPORT_EMAIL, { subject, html });
-  } catch (e) {
-    console.warn('Support email trigger failed:', e?.message || e);
-  }
+  } catch {}
 }
-
 async function showSupport(chatId, context = 'menu') {
   const msg =
     `🧑‍💼 <b>Support</b>\n` +
@@ -230,11 +226,10 @@ async function showSupport(chatId, context = 'menu') {
     `• Email: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>\n` +
     `We’re here to help.`;
   await riderBot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
-  // Notify admin team
   await triggerSupportEmail(chatId, `User opened Support (${context})`);
 }
 
-/* ---------- UX prompts ---------- */
+/* ---------------- UX prompts ---------------- */
 function askPickup(chatId) {
   return riderBot.sendMessage(
     chatId,
@@ -261,7 +256,6 @@ function askDrop(chatId) {
     }
   );
 }
-
 async function showAddressSuggestions(chatId, predictions, kind) {
   if (!predictions.length) {
     await riderBot.sendMessage(
@@ -281,12 +275,70 @@ async function showAddressSuggestions(chatId, predictions, kind) {
   );
 }
 
-/* ---------- Wire handlers once ---------- */
+/* ---------- after destination → fetch quotes & show options ---------- */
+async function showQuotesOrRetry(chatId, st) {
+  let quotes = [];
+  try {
+    quotes = await getAvailableVehicleQuotes({
+      pickup: st.pickup,
+      destination: st.destination,
+      radiusKm: 30
+    });
+  } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
+
+  if (!quotes.length) {
+    st.step = 'awaiting_pickup';
+    riderState.set(chatId, st);
+    await riderBot.sendMessage(chatId, '😞 No drivers are currently available nearby. Please try again.');
+    return askPickup(chatId);
+  }
+
+  const keyboard = quotes.map((q) => ([
+    { text: `${vehicleTypeLabel(q.vehicleType)} — R${q.price}${q.etaMin ? ` (~${q.etaMin}m)` : ''}`, callback_data: `veh:${q.vehicleType}:${q.price}` }
+  ]));
+  st.dynamicQuotes = quotes;
+  st.step = 'selecting_vehicle';
+  riderState.set(chatId, st);
+
+  await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
+}
+
+/* ---------------- Wire handlers once ---------------- */
 function wireRiderHandlers() {
   if (globalThis.__riderBotSingleton.wired) return;
   globalThis.__riderBotSingleton.wired = true;
 
-  // /start
+  // === NEW: when a driver accepts, inform the rider with driver details ===
+  try {
+    driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
+      try {
+        const ride = await Ride.findById(rideId).lean();
+        if (!ride || !ride.riderChatId || !ride.driverId) return;
+
+        const riderChatId = Number(ride.riderChatId);
+        const driver = await Driver.findById(ride.driverId).lean();
+        if (!driver) return;
+
+        const card = formatDriverCardForRider({ driver, ride });
+        await riderBot.sendMessage(
+          riderChatId,
+          `✅ <b>Driver assigned</b>\n${card}`,
+          { parse_mode: 'HTML', disable_web_page_preview: true }
+        );
+
+        if (PUBLIC_URL) {
+          const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(String(rideId))}`;
+          const riderLink = `${base}&as=rider&riderChatId=${encodeURIComponent(String(riderChatId))}`;
+          await riderBot.sendMessage(riderChatId, `🗺️ Live trip map:\n${riderLink}`);
+        }
+      } catch (e) {
+        console.warn('riderBot driverEvents ride:accepted handler failed:', e?.message || e);
+      }
+    });
+  } catch (e) {
+    console.warn('driverEvents subscription failed (riderBot):', e?.message || e);
+  }
+
   riderBot.onText(/\/start/i, async (msg) => {
     const chatId = msg.chat.id;
     riderState.delete(chatId);
@@ -317,27 +369,31 @@ function wireRiderHandlers() {
       }).sort({ completedAt: -1 }).lean();
 
       if (lastUnrated?._id) {
+        const row = Array.from({ length: 5 }, (_, i) => {
+          const n = i + 1;
+          return [{ text: '★'.repeat(n), callback_data: `rate_driver:${String(lastUnrated._id)}:${n}` }];
+        });
         await riderBot.sendMessage(chatId, 'Please rate your last driver:', {
-          reply_markup: riderStarsKeyboard(String(lastUnrated._id)).reply_markup
+          reply_markup: { inline_keyboard: row }
         });
       }
     } catch {}
   });
 
-  // /help or /support from text
   riderBot.onText(/\/support|^support$|^help$|\/help/i, async (msg) => {
-    const chatId = msg.chat.id;
-    await showSupport(chatId, 'command');
+    await showSupport(msg.chat.id, 'command');
   });
 
   riderBot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+
+    // Keep emitting rider live location for admin map
     if (msg.location) {
       const { latitude, longitude } = msg.location;
       await emitRiderLocation(chatId, { lat: latitude, lng: longitude });
     }
 
-    const state = riderState.get(chatId);
+    const st = riderState.get(chatId);
     const text = (msg.text || '').trim();
 
     // quick support keyword while in any state
@@ -346,24 +402,23 @@ function wireRiderHandlers() {
       return;
     }
 
-    if (state && state.step) {
-      if (state.step === 'awaiting_name' && text) {
-        state.name = text;
-        state.step = 'awaiting_email';
-        riderState.set(chatId, state);
+    // Registration flow
+    if (st && st.step && (st.step === 'awaiting_name' || st.step === 'awaiting_email')) {
+      if (st.step === 'awaiting_name' && text) {
+        st.name = text;
+        st.step = 'awaiting_email';
+        riderState.set(chatId, st);
         return riderBot.sendMessage(chatId, '📧 Enter your email address:');
       }
-      if (state.step === 'awaiting_email' && text) {
-        // Finish registration WITHOUT any credit flow
+      if (st.step === 'awaiting_email' && text) {
         const dashboardToken = crypto.randomBytes(24).toString('hex');
         const dashboardPin = Math.floor(1000 + Math.random() * 9000).toString();
         const expiry = new Date(Date.now() + 10 * 60 * 1000);
-
         await Rider.findOneAndUpdate(
           { chatId },
           {
             $set: {
-              name: state.name,
+              name: st.name,
               email: text,
               dashboardToken,
               dashboardPin,
@@ -373,34 +428,46 @@ function wireRiderHandlers() {
           },
           { upsert: true }
         );
-
         riderState.delete(chatId);
-
         const link = `${PUBLIC_URL}/rider-dashboard.html?token=${dashboardToken}`;
         return riderBot.sendMessage(
           chatId,
           `✅ Registration complete!\n\n🔐 Dashboard link:\n${link}\n\n🔢 Your PIN: <b>${dashboardPin}</b>\n⏱️ Expires in 10 mins`,
-          {
-            parse_mode: 'HTML',
-            reply_markup: mainMenuKeyboard()
-          }
+          { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
         );
       }
+      return;
     }
 
-    const st = riderState.get(chatId);
-    if (st && (st.step === 'awaiting_pickup' || st.step === 'awaiting_drop')) {
-      const typed = (msg.text || '').trim();
-      if (typed && isLikelyQuery(typed)) {
-        const sessiontoken = crypto.randomBytes(16).toString('hex');
-        const preds = await gmapsAutocomplete(typed, { sessiontoken });
-        st.gmapsSession = sessiontoken;
-        st.predictions = preds; // save for index callback
-        riderState.set(chatId, st);
-        await showAddressSuggestions(chatId, preds, st.step === 'awaiting_pickup' ? 'pickup' : 'drop');
-        return;
-      }
-      if (!msg.location) return;
+    // === Booking state machine ===
+    if (!st) return; // not in a booking session
+
+    // 1) Typed address while awaiting pickup/drop → show suggestions
+    if ((st.step === 'awaiting_pickup' || st.step === 'awaiting_drop') && text && isLikelyQuery(text)) {
+      const sessiontoken = crypto.randomBytes(16).toString('hex');
+      const preds = await gmapsAutocomplete(text, { sessiontoken });
+      st.gmapsSession = sessiontoken;
+      st.predictions = preds;
+      riderState.set(chatId, st);
+      await showAddressSuggestions(chatId, preds, st.step === 'awaiting_pickup' ? 'pickup' : 'drop');
+      return;
+    }
+
+    // 2) Live location while awaiting pickup → set pickup, ask for destination
+    if (msg.location && st.step === 'awaiting_pickup') {
+      st.pickup = { lat: msg.location.latitude, lng: msg.location.longitude };
+      st.step = 'awaiting_drop';
+      st.predictions = [];
+      riderState.set(chatId, st);
+      await riderBot.sendMessage(chatId, '📍 Pickup saved.');
+      return askDrop(chatId);
+    }
+
+    // 3) Live location while awaiting drop → set destination and show quotes
+    if (msg.location && st.step === 'awaiting_drop') {
+      st.destination = { lat: msg.location.latitude, lng: msg.location.longitude };
+      await showQuotesOrRetry(chatId, st);
+      return;
     }
   });
 
@@ -430,7 +497,7 @@ function wireRiderHandlers() {
         return;
       }
 
-      /* ======= pickup/destination via short indices ======= */
+      // Select pickup from autocomplete
       if (data.startsWith('pick_idx:')) {
         const idx = Number(data.split(':')[1] || -1);
         const st = riderState.get(chatId) || { step: 'awaiting_pickup' };
@@ -453,6 +520,7 @@ function wireRiderHandlers() {
         return askDrop(chatId);
       }
 
+      // Select destination from autocomplete → show vehicle quotes
       if (data.startsWith('drop_idx:')) {
         const idx = Number(data.split(':')[1] || -1);
         const st = riderState.get(chatId);
@@ -472,43 +540,12 @@ function wireRiderHandlers() {
           await riderBot.sendMessage(chatId, '❌ Could not resolve that address (ZA). Please try again or send your location.');
           return askDrop(chatId);
         }
-
         st.destination = { lat: loc.lat, lng: loc.lng };
-        st.step = 'selecting_vehicle';
-        st.predictions = [];
-        riderState.set(chatId, st);
-
-        let quotes = [];
-        try {
-          quotes = await getAvailableVehicleQuotes({
-            pickup: st.pickup,
-            destination: st.destination,
-            radiusKm: 30
-          });
-        } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
-
-        if (!quotes.length) {
-          st.step = 'awaiting_pickup';
-          riderState.set(chatId, st);
-          await riderBot.sendMessage(chatId, '😞 No drivers are currently available nearby. Please try again.');
-          return askPickup(chatId);
-        }
-
-        const toLabel = (vt) => vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
-        const keyboard = quotes.map((q) => ([{ text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }]));
-        st.dynamicQuotes = quotes;
-        riderState.set(chatId, st);
-
-        await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
+        await showQuotesOrRetry(chatId, st);
         return;
       }
-      /* ======= END index handlers ======= */
 
-      // Back-compat: old long payloads (keep)
-      if (data.startsWith('pick_place:') || data.startsWith('drop_place:')) {
-        // deprecated in your current flow; ignored
-      }
-
+      // Choose vehicle → create ride → ask for Cash or PayFast
       if (data.startsWith('veh:')) {
         const [, vehicleType, priceStr] = data.split(':');
         const price = Number(priceStr);
@@ -526,9 +563,10 @@ function wireRiderHandlers() {
           destination: st.destination,
           estimate: price,
           vehicleType,
-          status: 'payment_pending',     // will flip on cash or PayFast ITN
+          status: 'payment_pending',     // PayFast will confirm later; Cash switches to pending below
           paymentMethod: 'payfast',
-          platform: 'telegram'
+          platform: 'telegram',
+          createdAt: new Date()
         });
 
         const payfastRedirect = `${PUBLIC_URL}/pay/${ride._id}`;
@@ -537,24 +575,19 @@ function wireRiderHandlers() {
           reply_markup: {
             inline_keyboard: [
               [{ text: '💵 Cash', callback_data: `pay_cash_${ride._id}` }],
-              [{ text: '💳 Pay with Card (Payfast)', url: payfastRedirect }]
+              [{ text: '💳 Pay with Card (PayFast)', url: payfastRedirect }]
             ]
           }
         });
 
-        riderState.set(chatId, {
-          ...st,
-          step: 'awaiting_payment',
-          chosenVehicleType: vehicleType,
-          rideId: String(ride._id)
-        });
-
+        st.step = 'awaiting_payment';
+        st.chosenVehicleType = vehicleType;
+        st.rideId = String(ride._id);
+        riderState.set(chatId, st);
         return;
       }
 
-      // ─────────────────────────────────────────────────────────
-      // 💵 CASH chosen → confirm & dispatch the ride immediately
-      // ─────────────────────────────────────────────────────────
+      // 💵 CASH chosen → flip to pending + dispatch immediately
       if (data.startsWith('pay_cash_')) {
         const rideId = data.replace('pay_cash_', '');
         const ride = await Ride.findById(rideId);
@@ -563,19 +596,15 @@ function wireRiderHandlers() {
           await riderBot.sendMessage(chatId, '❌ Sorry, that ride could not be found.');
           return;
         }
-
-        // Only allow if this chat created the ride
         if (String(ride.riderChatId) !== String(chatId)) {
           try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your ride' }); } catch {}
           return;
         }
 
-        // Flip to pending so the dispatcher picks it up
         ride.paymentMethod = 'cash';
         ride.status = 'pending';
         await ride.save();
 
-        // Ack to user
         try { await riderBot.answerCallbackQuery(query.id, { text: 'Cash selected' }); } catch {}
         await riderBot.sendMessage(
           chatId,
@@ -583,9 +612,8 @@ function wireRiderHandlers() {
           { parse_mode: 'Markdown' }
         );
 
-        // 🔔 Trigger the dispatcher
+        // 🔔 Dispatcher picks up
         try { riderEvents.emit('booking:new', { rideId: String(ride._id) }); } catch {}
-
         return;
       }
 
@@ -597,7 +625,7 @@ function wireRiderHandlers() {
 
         const ride = await Ride.findById(rideId);
         if (!ride) { try { await riderBot.answerCallbackQuery(query.id, { text: 'Ride not found' }); } catch {} return; }
-        if (String(ride.riderChatId) !== String(chatId)) { try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your ride' }); } catch {} return; }
+        if (String(ride.riderChatId) !== String(chatId)) { try { await riderBot.answerCallbackQuery(query.id, { text: 'Not your trip' }); } catch {} return; }
 
         ride.driverRating = stars;
         ride.driverRatedAt = new Date();
@@ -605,8 +633,8 @@ function wireRiderHandlers() {
 
         try {
           if (ride.driverId) {
-            const { default: Driver } = await import('../models/Driver.js');
-            await Driver.computeAndUpdateStats(ride.driverId);
+            const d = await Driver.findById(ride.driverId);
+            if (d) await Driver.computeAndUpdateStats(d._id);
           }
         } catch {}
 
@@ -614,7 +642,6 @@ function wireRiderHandlers() {
         await riderBot.sendMessage(chatId, `✅ Rating saved: ${'★'.repeat(stars)}`);
         return;
       }
-
     } catch (err) {
       console.error('rider callback_query error:', err);
       try { await riderBot.answerCallbackQuery(query.id, { text: '⚠️ Error. Try again.' }); } catch {}
@@ -622,52 +649,7 @@ function wireRiderHandlers() {
     }
   });
 
-  riderBot.on('location', async (msg) => {
-    const chatId = msg.chat.id;
-    const { latitude, longitude } = msg.location || {};
-    if (typeof latitude !== 'number' || typeof longitude !== 'number') return;
-
-    const coords = { lat: latitude, lng: longitude };
-    await emitRiderLocation(chatId, coords);
-
-    const state = riderState.get(chatId);
-    if (!state) return;
-
-    if (state.step === 'awaiting_pickup') {
-      state.pickup = coords;
-      state.step = 'awaiting_drop';
-      riderState.set(chatId, state);
-      await riderBot.sendMessage(chatId, '📍 Pickup saved.');
-      return askDrop(chatId);
-    }
-
-    if (state.step === 'awaiting_drop') {
-      state.destination = coords;
-      state.step = 'selecting_vehicle';
-
-      let quotes = [];
-      try {
-        quotes = await getAvailableVehicleQuotes({
-          pickup: state.pickup, destination: state.destination, radiusKm: 30
-        });
-      } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
-
-      if (!quotes.length) {
-        state.step = 'awaiting_pickup';
-        riderState.set(chatId, state);
-        await riderBot.sendMessage(chatId, '😞 No drivers are currently available nearby. Please try again.');
-        return askPickup(chatId);
-      }
-
-      const toLabel = (vt) => vt === 'comfort' ? 'Comfort' : vt === 'luxury' ? 'Luxury' : vt === 'xl' ? 'XL' : 'Normal';
-      const keyboard = quotes.map((q) => ([{ text: `${toLabel(q.vehicleType)} — R${q.price}`, callback_data: `veh:${q.vehicleType}:${q.price}` }]));
-      state.dynamicQuotes = quotes;
-      riderState.set(chatId, state);
-
-      await riderBot.sendMessage(chatId, '🚘 Select your ride (based on nearby drivers):', { reply_markup: { inline_keyboard: keyboard } });
-    }
-  });
-
+  // Also update live location when user edits a live-location message
   riderBot.on('edited_message', async (msg) => {
     if (!msg?.location) return;
     const chatId = msg.chat.id;
@@ -676,23 +658,29 @@ function wireRiderHandlers() {
   });
 }
 
-/* ---------- Notifier: ask rider to rate driver (exported) ---------- */
+/* ---------------- Notifier: ask rider to rate driver (used by finish route) ---------------- */
 export async function notifyRiderToRateDriver(ride) {
   try {
     const chatId = ride.riderChatId;
     if (!chatId) return;
-    await riderBot.sendMessage(chatId, 'Your trip is complete. Please rate your driver:', riderStarsKeyboard(String(ride._id)));
+    const row = Array.from({ length: 5 }, (_, i) => {
+      const n = i + 1;
+      return [{ text: '★'.repeat(n), callback_data: `rate_driver:${String(ride._id)}:${n}` }];
+    });
+    await riderBot.sendMessage(chatId, 'Your trip is complete. Please rate your driver:', {
+      reply_markup: { inline_keyboard: row }
+    });
   } catch (e) {
     console.warn('notifyRiderToRateDriver failed:', e?.message || e);
   }
 }
 
-/* ---------- Init ---------- */
+/* ---------------- Init + exports ---------------- */
 export function initRiderBot({ io, app } = {}) {
   ioRef = io || ioRef;
 
   if (globalThis.__riderBotSingleton.started && riderBot) {
-    console.log('🤖 Rider bot already initialized (singleton)'); 
+    console.log('🤖 Rider bot already initialized (singleton)');
     return riderBot;
   }
 

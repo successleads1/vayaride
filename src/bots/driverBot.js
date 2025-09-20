@@ -3,6 +3,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import EventEmitter from 'events';
 import Driver from '../models/Driver.js';
 import Ride from '../models/Ride.js';
+import Rider from '../models/Rider.js'; // NEW: to look up rider info for driver messages
 
 export const driverEvents = new EventEmitter();
 
@@ -22,10 +23,69 @@ const MODE = process.env.TELEGRAM_MODE || 'polling'; // 'polling' | 'webhook'
 const token = process.env.TELEGRAM_DRIVER_BOT_TOKEN;
 if (!token) throw new Error('TELEGRAM_DRIVER_BOT_TOKEN is not defined in .env');
 
-const PUBLIC_URL = process.env.PUBLIC_URL || '';
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
 const DRIVER_WEBHOOK_PATH = process.env.TELEGRAM_DRIVER_WEBHOOK_PATH || '/telegram/driver';
 
 const toNum = (v) => (v == null ? v : Number(v));
+
+/* ---------------- Phone helpers ---------------- */
+function normalizePhone(raw) {
+  if (!raw) return null;
+  let s = String(raw).trim().replace(/[^\d+]/g, '');
+  if (!s) return null;
+
+  if (s.startsWith('+')) {
+    const digits = s.replace(/\D/g, '');
+    if (digits.length < 8 || digits.length > 15) return null;
+    return '+' + digits;
+  }
+
+  // ZA-friendly defaults: 0xxxxxxxxx -> +27xxxxxxxxx ; 27xxxxxxxxx -> +27xxxxxxxxx
+  if (s.startsWith('0')) s = '27' + s.slice(1);
+  const digits = s.replace(/\D/g, '');
+  if (digits.length < 8 || digits.length > 15) return null;
+  return '+' + digits;
+}
+function hasPhone(drv) {
+  return !!(drv && (drv.phone || drv.phoneNumber || drv.mobile || drv.msisdn));
+}
+
+/* ---------------- Vehicle helpers ---------------- */
+const vtLabel = (t) =>
+  t === 'comfort' ? 'Comfort' : t === 'luxury' ? 'Luxury' : t === 'xl' ? 'XL' : 'Normal';
+
+const vtNormalize = (s = '') => {
+  const v = String(s).trim().toLowerCase();
+  if (['comfort'].includes(v)) return 'comfort';
+  if (['luxury', 'premier', 'exec', 'premium'].includes(v)) return 'luxury';
+  if (['xl', 'van', 'people carrier', 'minivan'].includes(v)) return 'xl';
+  if (['normal', 'standard', 'uberx', 'bolt', 'economy', 'base'].includes(v)) return 'normal';
+  return 'normal';
+};
+
+function carPretty(d) {
+  const pieces = [];
+  if (d?.vehicleName) pieces.push(d.vehicleName);
+  else {
+    const mm = [d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
+    if (mm) pieces.push(mm);
+  }
+  if (d?.vehicleColor) pieces.push(`(${d.vehicleColor})`);
+  return pieces.join(' ').trim() || '—';
+}
+
+function missingVehicleFields(drv) {
+  const missing = [];
+  if (!drv?.vehiclePlate) missing.push('plate');
+  if (!drv?.vehicleMake) missing.push('make');
+  if (!drv?.vehicleModel) missing.push('model');
+  if (!drv?.vehicleColor) missing.push('color');
+  if (!drv?.vehicleType) missing.push('type');
+  return missing;
+}
+function vehicleComplete(drv) {
+  return missingVehicleFields(drv).length === 0;
+}
 
 /* ---------------- UI helpers ---------------- */
 function onlineKeyboard(isOnline) {
@@ -39,7 +99,6 @@ function onlineKeyboard(isOnline) {
     }
   };
 }
-
 function starsKeyboard(kind, rideId) {
   const row = Array.from({ length: 5 }, (_, i) => {
     const n = i + 1;
@@ -47,13 +106,33 @@ function starsKeyboard(kind, rideId) {
   });
   return { reply_markup: { inline_keyboard: [row] } };
 }
-
 function locationKeyboard() {
   return {
     reply_markup: {
       keyboard: [[{ text: 'Send Live Location 📍', request_location: true }]],
       resize_keyboard: true,
       one_time_keyboard: false
+    }
+  };
+}
+function phoneKeyboard() {
+  return {
+    parse_mode: 'Markdown',
+    reply_markup: {
+      keyboard: [[{ text: '📲 Share my number', request_contact: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  };
+}
+function typeKeyboard() {
+  return {
+    reply_markup: {
+      keyboard: [[
+        { text: 'normal' }, { text: 'comfort' }, { text: 'luxury' }, { text: 'xl' }
+      ]],
+      resize_keyboard: true,
+      one_time_keyboard: true
     }
   };
 }
@@ -83,20 +162,6 @@ async function getOrLinkDriverByChat(msg) {
   }
   return driver;
 }
-async function linkDriverByEmail(email, msg) {
-  const chatId = toNum(msg.chat.id);
-  const tgUsername = msg.from?.username || null;
-
-  const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-  await Driver.updateMany({ chatId }, { $unset: { chatId: '' } });
-
-  const driver = await Driver.findOneAndUpdate(
-    { email: emailRegex },
-    { $set: { chatId, telegramUsername: tgUsername } },
-    { new: true }
-  );
-  return driver;
-}
 
 /* ---------------- Stats helpers ---------------- */
 function fmtKm(meters) { return `${(Number(meters || 0) / 1000).toFixed(2)} km`; }
@@ -111,34 +176,112 @@ function paymentEmoji(method) {
   if (method === 'payfast' || method === 'app') return '💳';
   return '✅';
 }
-function formatStatsMessage(driver) {
-  const s = driver?.stats || {}; const last = s.lastTrip || {};
-  const lines = [];
-  lines.push('📊 <b>Your Stats</b>');
-  lines.push(`• Trips: <b>${s.totalTrips || 0}</b>`);
-  lines.push(`• Distance: <b>${fmtKm(s.totalDistanceM || 0)}</b>`);
-  lines.push(`• Earnings: <b>${fmtAmount(s.totalEarnings || 0)}</b>`);
-  lines.push(`• Payments: ${s.cashCount || 0} cash · ${s.payfastCount || 0} payfast`);
+function formatStatsCompact(driver) {
+  const s = driver?.stats || {};
+  const parts = [];
+  parts.push(`💰 <b>${fmtAmount(s.totalEarnings || 0)}</b>`);
+  parts.push(`🧾 ${s.totalTrips || 0} trips`);
   if (typeof s.avgRating === 'number' && s.ratingsCount >= 0) {
-    lines.push(`• Rating: <b>${(s.avgRating || 0).toFixed(2)}</b> (${s.ratingsCount || 0})`);
+    parts.push(`⭐ ${(s.avgRating || 0).toFixed(2)} (${s.ratingsCount || 0})`);
   }
-  if (last && last.rideId) {
-    const p = last.pickup ? `${last.pickup.lat?.toFixed(5)},${last.pickup.lng?.toFixed(5)}` : '—';
-    const d = last.drop ? `${last.drop.lat?.toFixed(5)},${last.drop.lng?.toFixed(5)}` : '—';
-    lines.push('\n🧾 <b>Last Trip</b>');
-    lines.push(`• Distance: <b>${fmtKm(last.distanceMeters || 0)}</b>`);
-    lines.push(`• Duration: <b>${fmtDuration(last.durationSec || 0)}</b>`);
-    lines.push(`• Amount: <b>${fmtAmount(last.amount || 0)}</b> ${paymentEmoji(last.method)}`);
-    lines.push(`• Pickup: <code>${p}</code>`);
-    lines.push(`• Drop:   <code>${d}</code>`);
-  }
-  return lines.join('\n');
+  return parts.join(' · ');
 }
 async function ensureAndGetDriverStatsByChat(chatId) {
   const driver = await Driver.findOne({ chatId: Number(chatId) });
   if (!driver) return null;
   try { await Driver.computeAndUpdateStats(driver._id); } catch {}
   return await Driver.findById(driver._id);
+}
+
+/* ---------------- State ---------------- */
+// chatId -> { step: 'awaiting_phone' | 'veh_plate' | 'veh_make' | 'veh_model' | 'veh_color' | 'veh_type' | post_action?: 'go_online'|'accept:<rideId>' }
+const driverState = new Map();
+
+/* ---------------- Vehicle wizard ---------------- */
+async function startVehicleWizard(chatId, driver, postAction = null) {
+  const d = driver || await Driver.findOne({ chatId: Number(chatId) }).lean();
+  const next = nextVehicleStep(d);
+  if (!next) return true; // already complete
+  driverState.set(chatId, { step: next, post_action: postAction || null });
+  await askVehicleQuestion(chatId, next);
+  return false;
+}
+function nextVehicleStep(drv) {
+  if (!drv?.vehiclePlate) return 'veh_plate';
+  if (!drv?.vehicleMake)  return 'veh_make';
+  if (!drv?.vehicleModel) return 'veh_model';
+  if (!drv?.vehicleColor) return 'veh_color';
+  if (!drv?.vehicleType)  return 'veh_type';
+  return null;
+}
+async function askVehicleQuestion(chatId, step) {
+  if (step === 'veh_plate') {
+    return bot.sendMessage(
+      chatId,
+      '🔖 What is your number plate?\nExample: <b>CA 123 456</b>',
+      { parse_mode: 'HTML' }
+    );
+  }
+  if (step === 'veh_make') {
+    return bot.sendMessage(chatId, '🏷️ Car make?\nExample: <b>Toyota</b>', { parse_mode: 'HTML' });
+  }
+  if (step === 'veh_model') {
+    return bot.sendMessage(chatId, '🔤 Car model?\nExample: <b>Corolla</b>', { parse_mode: 'HTML' });
+  }
+  if (step === 'veh_color') {
+    return bot.sendMessage(chatId, '🎨 Car color?\nExample: <b>white</b>', { parse_mode: 'HTML' });
+  }
+  if (step === 'veh_type') {
+    return bot.sendMessage(
+      chatId,
+      '🚘 Vehicle type? (choose or type one)\nnormal · comfort · luxury · xl',
+      typeKeyboard()
+    );
+  }
+}
+
+/* ---------------- helpers for outbound ride notifications ---------------- */
+const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
+
+/* ---------------- NEW: formatting rider details for the driver ---------------- */
+function formatRiderCardForDriver({ rider, ride }) {
+  const rPhone = rider?.phone || rider?.mobile || rider?.msisdn || '—';
+  const lines = [
+    '🙋 <b>Rider Details</b>',
+    `• Name: <b>${rider?.name || '—'}</b>`,
+    `• Phone: <b>${rPhone}</b>`,
+  ];
+  if (ride?.pickup) lines.push(`• Pickup: <a href="${toMap(ride.pickup)}">map</a>`);
+  if (ride?.destination) lines.push(`• Drop: <a href="${toMap(ride.destination)}">map</a>`);
+  return lines.join('\n');
+}
+
+/* ---------------- Minimal home (after setup complete) ---------------- */
+async function showDriverHome(chatId) {
+  let d = await ensureAndGetDriverStatsByChat(chatId);
+  if (!d) return;
+
+  // 1) Compact stats first
+  try { await bot.sendMessage(chatId, formatStatsCompact(d), { parse_mode: 'HTML' }); } catch {}
+
+  // 2) Status + controls
+  const isOnline = !!d.isAvailable;
+  try {
+    await bot.sendMessage(
+      chatId,
+      isOnline ? '✅ You are ONLINE.' : '⏸ You are OFFLINE.',
+      onlineKeyboard(isOnline)
+    );
+  } catch {}
+
+  // 3) Brief location tip
+  try {
+    await bot.sendMessage(
+      chatId,
+      'Tip: when ONLINE, share Live Location via 📎 → Location → Share Live Location.',
+      { disable_web_page_preview: true }
+    );
+  } catch {}
 }
 
 /* ---------------- Bot init + wiring ---------------- */
@@ -155,6 +298,47 @@ function wireHandlers() {
   globalThis.__driverBotSingleton.wired = true;
 
   bot.sendApprovalNotice = sendApprovalNoticeInternal;
+
+  // Link by email (optional but helpful)
+  bot.onText(/^link\s+(.+)$/i, async (msg, match) => {
+    const chatId = toNum(msg.chat.id);
+    const email = (match?.[1] || '').trim();
+    if (!email) return void bot.sendMessage(chatId, 'Please provide an email: LINK your@email.com');
+
+    const rx = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const driver = await Driver.findOneAndUpdate(
+      { email: rx },
+      { $set: { chatId } },
+      { new: true }
+    );
+    if (!driver) {
+      await bot.sendMessage(chatId, '❌ Could not find a driver with that email. Make sure you registered on the website.');
+      return;
+    }
+
+    await bot.sendMessage(chatId, `✅ Linked to ${driver.email}.`);
+
+    // Gate: phone first, nothing else
+    if (!hasPhone(driver)) {
+      driverState.set(chatId, { step: 'awaiting_phone' });
+      await bot.sendMessage(
+        chatId,
+        '📱 Please share your mobile number (for rider contact & safety). You can *Share my number* or type it (e.g. 0812345678 or +27…):',
+        phoneKeyboard()
+      );
+      return; // stop here — no extra noise
+    }
+
+    // Gate: vehicle wizard next
+    if (!vehicleComplete(driver)) {
+      await bot.sendMessage(chatId, '🚗 Quick setup (few questions) so riders can identify you.');
+      await startVehicleWizard(chatId, driver);
+      return; // stop — hide online/location/stats until done
+    }
+
+    // All set → compact home
+    await showDriverHome(chatId);
+  });
 
   bot.onText(/\/start\b/, async (msg) => {
     const chatId = toNum(msg.chat.id);
@@ -173,33 +357,28 @@ function wireHandlers() {
       return;
     }
 
-    const isOnline = !!driver.isAvailable;
-    await bot.sendMessage(
-      chatId,
-      isOnline
-        ? '✅ You are currently ONLINE. You will receive ride requests.'
-        : '⏸ You are currently OFFLINE.',
-      onlineKeyboard(isOnline)
-    );
+    // 1) Phone gate
+    if (!hasPhone(driver)) {
+      driverState.set(chatId, { step: 'awaiting_phone' });
+      await bot.sendMessage(
+        chatId,
+        '📱 Please share your mobile number (for rider contact & safety). You can *Share my number* or type it (e.g. 0812345678 or +27…):',
+        phoneKeyboard()
+      );
+      return;
+    }
 
-    await bot.sendMessage(chatId, 'When ONLINE, share your **live location** so riders can be matched to you.', { parse_mode: 'Markdown' });
-    await bot.sendMessage(chatId, 'Tap below to send your location:', locationKeyboard());
-    await bot.sendMessage(
-      chatId,
-      '🛰 To stream **Live Location** (so the red dot moves):\n' +
-      '1) Tap the 📎 (attach) button → *Location*\n' +
-      '2) Choose **Share Live Location** (e.g., 15 minutes)\n' +
-      '3) Keep Telegram open in the background.',
-      { parse_mode: 'Markdown' }
-    );
+    // 2) Vehicle gate — run wizard and stop until done
+    if (!vehicleComplete(driver)) {
+      await bot.sendMessage(chatId, '🚗 Quick setup (few questions) so riders can identify you.');
+      await startVehicleWizard(chatId, driver);
+      return;
+    }
 
-    try {
-      driver = await ensureAndGetDriverStatsByChat(chatId);
-      if (driver?.stats) {
-        await bot.sendMessage(chatId, formatStatsMessage(driver), { parse_mode: 'HTML' });
-      }
-    } catch {}
+    // 3) All good → compact home first (earnings), then status + tip
+    await showDriverHome(chatId);
 
+    // 4) (Optional) After home, rating prompt if needed
     try {
       const since = new Date(Date.now() - 48 * 3600 * 1000);
       const d = await Driver.findOne({ chatId }).lean();
@@ -212,7 +391,11 @@ function wireHandlers() {
         }).sort({ completedAt: -1 }).lean();
 
         if (lastUnrated?._id) {
-          await bot.sendMessage(chatId, 'Please rate your last rider:', starsKeyboard('rate_rider', String(lastUnrated._id)));
+          await bot.sendMessage(
+            chatId,
+            'Please rate your last rider:',
+            starsKeyboard('rate_rider', String(lastUnrated._id))
+          );
         }
       }
     } catch {}
@@ -222,32 +405,81 @@ function wireHandlers() {
     const chatId = toNum(msg.chat.id);
     const driver = await ensureAndGetDriverStatsByChat(chatId);
     if (!driver) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
-    await bot.sendMessage(chatId, formatStatsMessage(driver), { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, formatStatsCompact(driver), { parse_mode: 'HTML' });
   });
 
   bot.onText(/^\/whoami$/, async (msg) => {
     const chatId = toNum(msg.chat.id);
     const driver = await Driver.findOne({ chatId }).lean();
     if (!driver) return void bot.sendMessage(chatId, "I don't see your driver profile yet. Try `LINK your@email.com`.");
+    const phone =
+      driver.phone || driver.phoneNumber || driver.mobile || driver.msisdn || '-';
     await bot.sendMessage(chatId, `You are:
 • email: ${driver.email || '-'}
 • name: ${driver.name || '-'}
+• phone: ${phone}
 • status: ${driver.status}
 • online: ${driver.isAvailable ? 'yes' : 'no'}
+• vehicle: ${carPretty(driver)} — ${vtLabel(driver.vehicleType)}
+• plate: ${driver.vehiclePlate || '—'}
 • chatId: ${driver.chatId}`);
   });
 
-  bot.onText(/^\/online$/, async (msg) => {
+  // Manual trigger to re-run vehicle wizard
+  bot.onText(/^\/vehicle$/, async (msg) => {
     const chatId = toNum(msg.chat.id);
-    const driver = await setAvailability(chatId, true);
-    if (!driver) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
-    await bot.sendMessage(chatId, '🟢 You are now ONLINE. You will receive ride requests.', onlineKeyboard(true));
-    await bot.sendMessage(chatId, 'Send your live location:', locationKeyboard());
+    const d = await Driver.findOne({ chatId }).lean();
+    if (!d) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
+    if (vehicleComplete(d)) {
+      await bot.sendMessage(
+        chatId,
+        `✅ Vehicle on file: ${carPretty(d)} — plate ${d.vehiclePlate}, type ${vtLabel(d.vehicleType)}`
+      );
+      return;
+    }
+    await bot.sendMessage(chatId, '🚗 Quick setup (few questions).');
+    await startVehicleWizard(chatId, d);
+  });
+
+  // Quick command to prompt phone again
+  bot.onText(/^\/phone$/i, async (msg) => {
+    const chatId = toNum(msg.chat.id);
+    driverState.set(chatId, { step: 'awaiting_phone' });
     await bot.sendMessage(
       chatId,
-      '🛰 To stream **Live Location**:\n' +
-      '📎 → Location → **Share Live Location**.',
-      { parse_mode: 'Markdown' }
+      '📱 Please share your mobile number. You can *Share my number* or type it (e.g. 0812345678 or +27…):',
+      phoneKeyboard()
+    );
+  });
+
+  // Online/Offline commands (ONLINE gated on complete phone + vehicle)
+  bot.onText(/^\/online$/, async (msg) => {
+    const chatId = toNum(msg.chat.id);
+    const driver = await Driver.findOne({ chatId }).lean();
+    if (!driver) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
+
+    if (!hasPhone(driver)) {
+      driverState.set(chatId, { step: 'awaiting_phone' });
+      await bot.sendMessage(
+        chatId,
+        '📱 Please add your mobile number first. You can *Share my number* or type it (e.g. 0812345678 or +27…):',
+        phoneKeyboard()
+      );
+      return;
+    }
+    if (!vehicleComplete(driver)) {
+      await bot.sendMessage(chatId, '🚗 Before you go ONLINE, let’s finish your vehicle details.');
+      await startVehicleWizard(chatId, driver, 'go_online');
+      return;
+    }
+
+    const d = await setAvailability(chatId, true);
+    if (!d) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
+    await bot.sendMessage(chatId, '🟢 You are now ONLINE.', onlineKeyboard(true));
+    await bot.sendMessage(
+      chatId,
+      'Share Live Location via 📎 → Location → Share Live Location.',
+      { disable_web_page_preview: true }
     );
   });
 
@@ -260,7 +492,6 @@ function wireHandlers() {
 
   async function recordAndBroadcastLocation(chatId, latitude, longitude) {
     if (typeof latitude !== 'number' || typeof longitude !== 'number') return;
-    console.log(`📥 DRIVER LOC <- chatId=${chatId} lat=${latitude} lng=${longitude}`);
 
     await Driver.findOneAndUpdate(
       { chatId: Number(chatId) },
@@ -268,27 +499,145 @@ function wireHandlers() {
       { new: true }
     );
 
-    console.log(`📤 EMIT driver:location -> chatId=${Number(chatId)} lat=${latitude} lng=${longitude}`);
     driverEvents.emit('driver:location', { chatId: Number(chatId), location: { lat: latitude, lng: longitude } });
   }
 
   bot.on('message', async (msg) => {
-    const loc = msg?.location;
-    if (!loc) return;
     const chatId = toNum(msg.chat.id);
-    await recordAndBroadcastLocation(chatId, loc.latitude, loc.longitude);
-    try { await bot.sendMessage(chatId, '📍 Location updated. Thanks!'); } catch {}
 
-    const looksOneOff = !msg.edit_date && !msg.live_period && !(msg.location && msg.location.live_period);
-    if (looksOneOff) {
-      try {
-        await bot.sendMessage(
-          chatId,
-          'ℹ️ I received a one-time location. To **update live** while you move:\n' +
-          '📎 → Location → **Share Live Location**.',
-          { parse_mode: 'Markdown' }
+    // --- PHONE CAPTURE (contact share preferred) ---
+    if (msg.contact && driverState.get(chatId)?.step === 'awaiting_phone') {
+      const phone = normalizePhone(msg.contact.phone_number);
+      if (!phone) {
+        await bot.sendMessage(chatId, '❌ That doesn’t look like a valid number. Please try again.');
+        await bot.sendMessage(chatId, 'Share your number or type it (e.g. 0812345678 or +27…):', phoneKeyboard());
+        return;
+      }
+      await Driver.findOneAndUpdate({ chatId: Number(chatId) }, { $set: { phone } }, { new: true });
+      driverState.delete(chatId);
+      await bot.sendMessage(chatId, `✅ Number saved: ${phone}`);
+
+      // After phone, if vehicle incomplete, go straight to wizard
+      const d = await Driver.findOne({ chatId }).lean();
+      if (!vehicleComplete(d)) {
+        await bot.sendMessage(chatId, '🚗 Quick setup (few questions) so riders can identify you.');
+        await startVehicleWizard(chatId, d);
+        return;
+      }
+
+      // If everything complete already
+      await showDriverHome(chatId);
+      return;
+    }
+
+    // Phone typed while awaiting_phone
+    if (driverState.get(chatId)?.step === 'awaiting_phone' && msg.text) {
+      const phone = normalizePhone(msg.text);
+      if (!phone) {
+        await bot.sendMessage(chatId, '❌ Please enter a valid phone number (e.g. 0812345678 or +27…)\nTip: tap *Share my number*.', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, 'Share your number or type it:', phoneKeyboard());
+        return;
+      }
+      await Driver.findOneAndUpdate({ chatId: Number(chatId) }, { $set: { phone } }, { new: true });
+      driverState.delete(chatId);
+      await bot.sendMessage(chatId, `✅ Number saved: ${phone}`);
+
+      const d = await Driver.findOne({ chatId }).lean();
+      if (!vehicleComplete(d)) {
+        await bot.sendMessage(chatId, '🚗 Quick setup (few questions) so riders can identify you.');
+        await startVehicleWizard(chatId, d);
+        return;
+      }
+      await showDriverHome(chatId);
+      return;
+    }
+
+    // --- VEHICLE WIZARD ANSWERS ---
+    const state = driverState.get(chatId);
+    if (state && state.step && state.step.startsWith('veh_') && msg.text) {
+      const text = (msg.text || '').trim();
+      let updated = null;
+
+      if (state.step === 'veh_plate') {
+        const val = text.replace(/\s+/g, ' ').trim().toUpperCase();
+        updated = await Driver.findOneAndUpdate(
+          { chatId: Number(chatId) },
+          { $set: { vehiclePlate: val } },
+          { new: true }
         );
-      } catch {}
+      } else if (state.step === 'veh_make') {
+        const val = text.replace(/\s+/g, ' ').trim();
+        updated = await Driver.findOneAndUpdate(
+          { chatId: Number(chatId) },
+          { $set: { vehicleMake: val } },
+          { new: true }
+        );
+      } else if (state.step === 'veh_model') {
+        const val = text.replace(/\s+/g, ' ').trim();
+        updated = await Driver.findOneAndUpdate(
+          { chatId: Number(chatId) },
+          { $set: { vehicleModel: val } },
+          { new: true }
+        );
+      } else if (state.step === 'veh_color') {
+        const val = text.replace(/\s+/g, ' ').trim();
+        updated = await Driver.findOneAndUpdate(
+          { chatId: Number(chatId) },
+          { $set: { vehicleColor: val } },
+          { new: true }
+        );
+      } else if (state.step === 'veh_type') {
+        const vt = vtNormalize(text);
+        updated = await Driver.findOneAndUpdate(
+          { chatId: Number(chatId) },
+          { $set: { vehicleType: vt } },
+          { new: true }
+        );
+      }
+
+      const next = nextVehicleStep(updated);
+      if (next) {
+        driverState.set(chatId, { step: next, post_action: state.post_action || null });
+        await askVehicleQuestion(chatId, next);
+        return;
+      }
+
+      driverState.delete(chatId);
+      const summary = `✅ Vehicle saved:\n• ${carPretty(updated)}\n• Plate: ${updated.vehiclePlate}\n• Type: ${vtLabel(updated.vehicleType)}`;
+      await bot.sendMessage(chatId, summary);
+      const post = state.post_action;
+
+      if (post === 'go_online') {
+        const d = await setAvailability(chatId, true);
+        if (d) {
+          await bot.sendMessage(chatId, '🟢 You are now ONLINE.', onlineKeyboard(true));
+          await bot.sendMessage(chatId, 'Share Live Location via 📎 → Location → Share Live Location.');
+        }
+      } else if (post && post.startsWith('accept:')) {
+        const rideId = post.split(':')[1];
+        await handleAcceptAfterSetup(chatId, rideId);
+      } else {
+        await showDriverHome(chatId);
+      }
+      return;
+    }
+
+    // --- LOCATION STREAM / ONE-OFF ---
+    const loc = msg?.location;
+    if (loc) {
+      await recordAndBroadcastLocation(chatId, loc.latitude, loc.longitude);
+      try { await bot.sendMessage(chatId, '📍 Location updated.'); } catch {}
+
+      const looksOneOff = !msg.edit_date && !msg.live_period && !(msg.location && msg.location.live_period);
+      if (looksOneOff) {
+        try {
+          await bot.sendMessage(
+            chatId,
+            'To stream continuously: 📎 → Location → Share Live Location.',
+            { disable_web_page_preview: true }
+          );
+        } catch {}
+      }
     }
   });
 
@@ -305,13 +654,31 @@ function wireHandlers() {
 
     try {
       if (data === 'drv_online') {
-        const driver = await setAvailability(chatId, true);
+        const driver = await Driver.findOne({ chatId }).lean();
+        if (!driver) { await bot.answerCallbackQuery(query.id); return void bot.sendMessage(chatId, '❌ Driver profile not found.'); }
+        if (!hasPhone(driver)) {
+          await bot.answerCallbackQuery(query.id);
+          driverState.set(chatId, { step: 'awaiting_phone' });
+          await bot.sendMessage(
+            chatId,
+            '📱 Add your mobile number first. You can *Share my number* or type it (e.g. 0812345678 or +27…):',
+            phoneKeyboard()
+          );
+          return;
+        }
+        if (!vehicleComplete(driver)) {
+          await bot.answerCallbackQuery(query.id);
+          await bot.sendMessage(chatId, '🚗 Before you go ONLINE, let’s finish your vehicle details.');
+          await startVehicleWizard(chatId, driver, 'go_online');
+          return;
+        }
+        const updated = await setAvailability(chatId, true);
         await bot.answerCallbackQuery(query.id);
-        if (!driver) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
-        await bot.editMessageText('🟢 You are now ONLINE. You will receive ride requests.', {
+        if (!updated) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
+        await bot.editMessageText('🟢 You are now ONLINE.', {
           chat_id: chatId, message_id: query.message.message_id, ...onlineKeyboard(true)
         });
-        await bot.sendMessage(chatId, 'Send your live location:', locationKeyboard());
+        await bot.sendMessage(chatId, 'Share Live Location via 📎 → Location → Share Live Location.');
         return;
       }
 
@@ -330,16 +697,50 @@ function wireHandlers() {
         const ride = await Ride.findById(rideId);
         if (!ride) return void bot.answerCallbackQuery(query.id, { text: 'Ride not found' });
 
-        const driver = await Driver.findOne({ chatId: Number(chatId) });
-        if (driver && !ride.driverId) { ride.driverId = driver._id; }
+        const driver = await Driver.findOne({ chatId: Number(chatId) }).lean();
+        if (!driver) { await bot.answerCallbackQuery(query.id, { text: 'Profile missing' }); return; }
+
+        // Gate acceptance on vehicle completeness
+        if (!vehicleComplete(driver)) {
+          await bot.answerCallbackQuery(query.id, { text: 'Finish vehicle setup first' });
+          await bot.sendMessage(chatId, '🚗 Let’s finish your vehicle details (for rider identification).');
+          await startVehicleWizard(chatId, driver, `accept:${rideId}`);
+          return;
+        }
+
+        // basic guard: don't override another driver's accepted job
+        if (ride.status && ride.status !== 'pending' && ride.driverId) {
+          await bot.answerCallbackQuery(query.id, { text: 'No longer available' });
+          return;
+        }
+
+        // Accept now
+        const d = await Driver.findOne({ chatId: Number(chatId) });
+        if (d && !ride.driverId) { ride.driverId = d._id; }
         ride.status = 'accepted';
         await ride.save();
 
         await bot.answerCallbackQuery(query.id, { text: 'Ride accepted' });
         await bot.sendMessage(chatId, '✅ You accepted the ride.');
 
-        console.log(`✅ Driver ${chatId} accepted ride ${rideId}`);
+        // 🔔 Emit system event for dispatcher / rider bot
         driverEvents.emit('ride:accepted', { driverId: chatId, rideId });
+
+        // 🧑‍🤝‍🧑 NEW: Send rider’s details to the driver immediately
+        try {
+          const rider = await Rider.findOne({ chatId: Number(ride.riderChatId) }).lean();
+          const details = formatRiderCardForDriver({ rider, ride });
+          await bot.sendMessage(chatId, details, { parse_mode: 'HTML', disable_web_page_preview: true });
+        } catch {}
+
+        // Send live trip map link for driver (parity with WA)
+        if (PUBLIC_URL) {
+          const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(String(rideId))}`;
+          const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(String(chatId))}`;
+          try {
+            await bot.sendMessage(chatId, `🗺️ Live trip map:\n${driverLink}\nTip: Keep Live Location ON for the trip.`);
+          } catch {}
+        }
         return;
       }
 
@@ -348,7 +749,6 @@ function wireHandlers() {
         const ride = await Ride.findById(rideId);
         await bot.answerCallbackQuery(query.id, { text: 'Ignored' });
         if (ride) driverEvents.emit('ride:ignored', { previousDriverId: chatId, ride });
-        console.log(`🙈 Driver ${chatId} ignored ride ${rideId}`);
         return;
       }
 
@@ -383,6 +783,42 @@ function wireHandlers() {
   });
 }
 
+async function handleAcceptAfterSetup(chatId, rideId) {
+  const ride = await Ride.findById(rideId);
+  if (!ride) return void bot.sendMessage(chatId, '❌ Ride not found anymore.');
+  const d = await Driver.findOne({ chatId: Number(chatId) });
+  if (!d) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
+  // Still available?
+  if (ride.status && ride.status !== 'pending' && ride.driverId) {
+    await bot.sendMessage(chatId, '⚠️ That request is no longer available.');
+    return;
+  }
+  if (!vehicleComplete(d)) {
+    await bot.sendMessage(chatId, '⚠️ Vehicle details incomplete. Please finish setup.');
+    await startVehicleWizard(chatId, d, `accept:${rideId}`);
+    return;
+  }
+  if (!ride.driverId) ride.driverId = d._id;
+  ride.status = 'accepted';
+  await ride.save();
+  await bot.sendMessage(chatId, '✅ You accepted the ride.');
+
+  // Emit + send rider details (same as in callback)
+  driverEvents.emit('ride:accepted', { driverId: chatId, rideId });
+  try {
+    const rider = await Rider.findOne({ chatId: Number(ride.riderChatId) }).lean();
+    const details = formatRiderCardForDriver({ rider, ride });
+    await bot.sendMessage(chatId, details, { parse_mode: 'HTML', disable_web_page_preview: true });
+  } catch {}
+
+  if (PUBLIC_URL) {
+    const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(String(rideId))}`;
+    const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(String(chatId))}`;
+    try { await bot.sendMessage(chatId, `🗺️ Live trip map:\n${driverLink}`); } catch {}
+  }
+}
+
+/* ---------------- Initialization ---------------- */
 export function initDriverBot({ io, app } = {}) {
   ioRef = io || ioRef;
 
@@ -425,7 +861,48 @@ export function initDriverBot({ io, app } = {}) {
   return bot;
 }
 
-/* ---------------- External hooks ---------------- */
+/* ---------------- External hooks (server helpers) ---------------- */
+// Notify a driver about a new request with Accept/Ignore buttons
+export async function notifyDriverNewRequest({ chatId, ride }) {
+  if (!bot || !chatId || !ride) return;
+
+  const short = String(ride._id).slice(-4).toLowerCase();
+  const bodyLines = [];
+  bodyLines.push('🚗 <b>New Ride Request</b>');
+  bodyLines.push(`• Vehicle: <b>${(ride.vehicleType || 'normal').toUpperCase()}</b>`);
+  if (ride.estimate != null) bodyLines.push(`• Estimate: <b>R${ride.estimate}</b>`);
+  if (ride.pickup) bodyLines.push(`• Pickup: <a href="${toMap(ride.pickup)}">map</a>`);
+  if (ride.destination) bodyLines.push(`• Drop: <a href="${toMap(ride.destination)}">map</a>`);
+  bodyLines.push('');
+  bodyLines.push(`Reply with the buttons below (or use code <b>${short}</b>).`);
+
+  try {
+    await bot.sendMessage(chatId, bodyLines.join('\n'), {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Accept', callback_data: `accept_${String(ride._id)}` },
+          { text: '🙈 Ignore', callback_data: `ignore_${String(ride._id)}` }
+        ]]
+      }
+    });
+  } catch {}
+}
+
+// Arrival & finish summaries for parity with WA bot
+export async function notifyDriverArrived({ chatId }) {
+  if (!bot || !chatId) return;
+  try { await bot.sendMessage(chatId, '📍 Arrival detected at pickup.'); } catch {}
+}
+
+export async function notifyDriverFinishSummary({ chatId, body, rideId }) {
+  if (!bot || !chatId) return;
+  try { await bot.sendMessage(chatId, body || '🏁 Trip finished.'); } catch {}
+  if (rideId) {
+    try { await bot.sendMessage(chatId, 'How was the rider? Please leave a rating:', starsKeyboard('rate_rider', String(rideId))); } catch {}
+  }
+}
+
 export async function notifyDriverRideFinished(rideId) {
   const ride = await Ride.findById(rideId).lean();
   if (!ride || !ride.driverId) return;

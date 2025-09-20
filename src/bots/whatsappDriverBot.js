@@ -43,7 +43,6 @@ let initializing = false;
 let currentQR = null;
 let connState = 'disconnected';
 
-const driverNames = new Map(); // jid -> name (cached displayName)
 const recentSends = new Map(); // dedupe "same message spam"
 const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
 
@@ -78,9 +77,14 @@ function jidFromPhone(phoneLike) {
   const raw = String(phoneLike || '').trim();
   if (!raw) return null;
   let digits = raw.replace(/[^\d]/g, '');
+  if (!digits) return null;
+
+  // ZA-friendly normalization
   if (digits.startsWith('0')) {
-    // ZA local → assume +27
     digits = '27' + digits.slice(1);
+  }
+  if (raw.startsWith('+')) {
+    digits = raw.replace(/[^\d]/g, '');
   }
   if (!/^\d{8,15}$/.test(digits)) return null;
   return `${digits}@s.whatsapp.net`;
@@ -111,17 +115,42 @@ async function sendText(jidOrPhone, text) {
   await sock.sendMessage(jid, { text });
 }
 
-async function sendButtons(jid, body, rideId) {
-  // Old-style buttons; if they fail, caller falls back to text.
-  const buttonsMessage = {
-    text: body,
-    buttons: [
-      { buttonId: `accept_${rideId}`, buttonText: { displayText: '✅ Accept' }, type: 1 },
-      { buttonId: `ignore_${rideId}`, buttonText: { displayText: '🙈 Ignore' }, type: 1 },
-    ],
-    headerType: 1
-  };
-  await sock.sendMessage(jid, buttonsMessage);
+/** Try interactive buttons in a robust way, then fallback to plain text. */
+async function sendInteractive(jid, { body, rideId }) {
+  // 1) Modern quick-reply templateButtons
+  try {
+    await sock.sendMessage(jid, {
+      text: body,
+      footer: 'If buttons don’t appear, reply ACCEPT or IGNORE',
+      templateButtons: [
+        { index: 1, quickReplyButton: { displayText: '✅ Accept', id: `accept_${rideId}` } },
+        { index: 2, quickReplyButton: { displayText: '🙈 Ignore', id: `ignore_${rideId}` } }
+      ],
+      viewOnce: true
+    });
+    return;
+  } catch (e) {
+    logger.warn('[WA-DRIVER] templateButtons send failed, trying legacy buttons: %s', e?.message || e);
+  }
+
+  // 2) Legacy buttons format
+  try {
+    const buttonsMessage = {
+      text: body,
+      buttons: [
+        { buttonId: `accept_${rideId}`, buttonText: { displayText: '✅ Accept' }, type: 1 },
+        { buttonId: `ignore_${rideId}`, buttonText: { displayText: '🙈 Ignore' }, type: 1 },
+      ],
+      headerType: 1
+    };
+    await sock.sendMessage(jid, buttonsMessage);
+    return;
+  } catch (e2) {
+    logger.warn('[WA-DRIVER] legacy buttons send failed, falling back to text: %s', e2?.message || e2);
+  }
+
+  // 3) Fallback: plain text
+  await sendText(jid, `${body}\n\nReply *ACCEPT* or *IGNORE*.`);
 }
 
 function onlineKeyboardText(isOnline) {
@@ -139,7 +168,7 @@ function fmtDuration(sec) {
 function fmtAmount(n) { return `R${Number(n || 0).toFixed(0)}`; }
 function paymentEmoji(method) {
   if (method === 'cash') return '💵';
-  if (method === 'payfast' || method === 'app') return '💳';
+  if (method === 'payfast' || method === 'app' || method === 'card') return '💳';
   return '✅';
 }
 
@@ -231,6 +260,29 @@ function resolveRideIdFromInput(jid, maybeCode) {
 /* -------------------- Inbound handlers -------------------- */
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 
+function vtLabel(t) {
+  if (t === 'comfort') return 'Comfort';
+  if (t === 'luxury')  return 'Luxury';
+  if (t === 'xl')      return 'XL';
+  return 'Normal';
+}
+
+function carPretty(d) {
+  const chunks = [];
+  if (d?.vehicleName) chunks.push(d.vehicleName);
+  else {
+    const mm = [d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
+    if (mm) chunks.push(mm);
+  }
+  if (d?.vehicleColor) chunks.push(`(${d.vehicleColor})`);
+  return chunks.join(' ').trim() || '—';
+}
+
+function toMap(coord) {
+  if (!coord || typeof coord.lat !== 'number' || typeof coord.lng !== 'number') return null;
+  return `https://maps.google.com/?q=${coord.lat},${coord.lng}`;
+}
+
 async function handleTextMessage(jid, raw) {
   const txt = String(raw || '').trim();
   const lower = txt.toLowerCase();
@@ -246,7 +298,11 @@ async function handleTextMessage(jid, raw) {
         `• Or register here:\n${PUBLIC_URL}/driver/register\n\n` +
         'Once linked, reply:\n' +
         '1 — Go ONLINE\n' +
-        '2 — Go OFFLINE'
+        '2 — Go OFFLINE\n\n' +
+        'Tip: Set your car & plate:\n' +
+        '• PLATE CA123456\n' +
+        '• CAR Toyota Corolla (white)\n' +
+        '• TYPE normal|comfort|luxury|xl'
       );
       return;
     }
@@ -256,24 +312,38 @@ async function handleTextMessage(jid, raw) {
       `👋 Hi ${driver.name || ''}\n` +
       `Status: *${driver.isAvailable ? 'ONLINE' : 'OFFLINE'}*\n` +
       `${onlineKeyboardText(!!driver.isAvailable)}\n\n` +
+      `Vehicle: ${carPretty(driver)} — ${vtLabel(driver.vehicleType)}\n` +
+      `Plate: ${driver.vehiclePlate || '—'}\n\n` +
       'Quick actions:\n' +
       '1 — Go ONLINE\n' +
       '2 — Go OFFLINE\n\n' +
       'Other commands:\n' +
       '• *STATS*\n' +
       '• *WHOAMI*\n' +
+      '• *ARRIVED* (at pickup), *START*, *FINISH*, *CANCEL <reason>*\n' +
+      '• *PLATE <text>*\n' +
+      '• *CAR <free text>*\n' +
+      '• *MAKE <make>*, *MODEL <model>*, *COLOR <color>*\n' +
+      '• *TYPE normal|comfort|luxury|xl*\n' +
       (pending ? `• For the latest request: reply *ACCEPT* or *IGNORE* (or include code *${short}*)` : '')
     );
     return;
   }
 
-  // allow plain email anywhere in the message to link
+  // allow plain email anywhere in the message to link (unless it's an accept/ignore)
   const emailMatch = txt.match(EMAIL_RE);
   if (emailMatch && !lower.startsWith('accept') && !lower.startsWith('ignore')) {
     const email = emailMatch[0];
     const linked = await linkDriverByEmail(email, jid);
     if (linked) {
-      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow send *1* to go ONLINE and start receiving jobs.`);
+      await sendText(jid,
+        `✅ Linked this WhatsApp number to *${linked.email}*.\n` +
+        `Now send *1* to go ONLINE and start receiving jobs.\n\n` +
+        `Tip: set your vehicle:\n` +
+        `• PLATE CA123456\n` +
+        `• CAR Toyota Corolla (white)\n` +
+        `• TYPE comfort`
+      );
     } else {
       await sendText(jid, `❌ Couldn’t find a driver with email: ${email}\nPlease make sure you registered on the website.`);
     }
@@ -285,17 +355,81 @@ async function handleTextMessage(jid, raw) {
     const email = txt.slice(5).trim();
     const linked = await linkDriverByEmail(email, jid);
     if (linked) {
-      await sendText(jid, `✅ Linked this WhatsApp number to *${linked.email}*.\nNow send *1* to go ONLINE and start receiving jobs.`);
+      await sendText(jid,
+        `✅ Linked this WhatsApp number to *${linked.email}*.\n` +
+        `Now send *1* to go ONLINE and start receiving jobs.\n\n` +
+        `Tip: set your vehicle:\n` +
+        `• PLATE CA123456\n` +
+        `• CAR Toyota Corolla (white)\n` +
+        `• TYPE comfort`
+      );
     } else {
       await sendText(jid, `❌ Couldn’t find a driver with email: ${email}\nPlease make sure you registered on the website.`);
     }
     return;
   }
 
-  // normalize for simple numeric shortcuts
-  const cleaned = lower.replace(/[\s().:-]+/g, ' ').trim();
+  // --- Vehicle detail updates ---
+  if (lower.startsWith('plate ')) {
+    const phone = phoneFromJid(jid);
+    if (!phone) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const plate = txt.slice(6).trim().toUpperCase().replace(/\s+/g, ' ');
+    const d = await Driver.findOneAndUpdate({ phone }, { $set: { vehiclePlate: plate } }, { new: true });
+    await sendText(jid, `✅ Plate saved: *${d?.vehiclePlate || plate}*`);
+    return;
+  }
+
+  if (lower.startsWith('car ')) {
+    const phone = phoneFromJid(jid);
+    if (!phone) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const name = txt.slice(4).trim();
+    const d = await Driver.findOneAndUpdate({ phone }, { $set: { vehicleName: name } }, { new: true });
+    await sendText(jid, `✅ Car saved: *${d?.vehicleName || name}*`);
+    return;
+  }
+
+  if (lower.startsWith('make ')) {
+    const phone = phoneFromJid(jid);
+    if (!phone) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const val = txt.slice(5).trim();
+    await Driver.findOneAndUpdate({ phone }, { $set: { vehicleMake: val } });
+    await sendText(jid, `✅ Make saved: *${val}*`);
+    return;
+  }
+
+  if (lower.startsWith('model ')) {
+    const phone = phoneFromJid(jid);
+    if (!phone) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const val = txt.slice(6).trim();
+    await Driver.findOneAndUpdate({ phone }, { $set: { vehicleModel: val } });
+    await sendText(jid, `✅ Model saved: *${val}*`);
+    return;
+  }
+
+  if (lower.startsWith('color ')) {
+    const phone = phoneFromJid(jid);
+    if (!phone) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const val = txt.slice(6).trim();
+    await Driver.findOneAndUpdate({ phone }, { $set: { vehicleColor: val } });
+    await sendText(jid, `✅ Color saved: *${val}*`);
+    return;
+  }
+
+  if (lower.startsWith('type ')) {
+    const phone = phoneFromJid(jid);
+    if (!phone) { await sendText(jid, '❌ Driver profile not found.'); return; }
+    const vt = txt.slice(5).trim().toLowerCase();
+    if (!['normal','comfort','luxury','xl'].includes(vt)) {
+      await sendText(jid, '❌ Invalid type. Use one of: normal, comfort, luxury, xl');
+      return;
+    }
+    await Driver.findOneAndUpdate({ phone }, { $set: { vehicleType: vt } });
+    await sendText(jid, `✅ Vehicle type set to *${vtLabel(vt)}*`);
+    return;
+  }
 
   // availability — accept: "1", "go online", "online", "/online"
+  const cleaned = lower.replace(/[\s().:-]+/g, ' ').trim();
   if (cleaned === '1' || cleaned === 'online' || cleaned === '/online' || cleaned.startsWith('go online')) {
     const driver = await setAvailabilityByJid(jid, true);
     if (!driver) { await sendText(jid, '❌ Driver profile not found. Please send your *email address* to link.'); return; }
@@ -334,12 +468,51 @@ async function handleTextMessage(jid, raw) {
     if (!d) { await sendText(jid, '❌ Driver profile not found.'); return; }
     await sendText(jid,
       `You are:\n` +
-      `• email: ${d.email || '-'}\n` +
       `• name: ${d.name || '-'}\n` +
-      `• status: ${d.status}\n` +
+      `• email: ${d.email || '-'}\n` +
+      `• phone: ${d.phone || phoneFromJid(jid) || '-'}\n` +
+      `• status: ${d.status || '-'}\n` +
       `• online: ${d.isAvailable ? 'yes' : 'no'}\n` +
-      `• phone: ${d.phone || phoneFromJid(jid) || '-'}`
+      `• vehicle: ${carPretty(d)} — ${vtLabel(d.vehicleType)}\n` +
+      `• plate: ${d.vehiclePlate || '—'}\n`
     );
+    return;
+  }
+
+  // Trip lifecycle quick commands (optional but handy)
+  if (lower === 'arrived' || lower === '/arrived') {
+    const rideId = resolveRideIdFromInput(jid);
+    if (!rideId) { await sendText(jid, 'No trip active. Use *ACCEPT* first.'); return; }
+    driverEvents.emit('ride:arrived', { rideId });
+    await sendText(jid, '📍 Marked as *arrived* at pickup.');
+    return;
+  }
+
+  if (lower === 'start' || lower === '/start') {
+    const rideId = resolveRideIdFromInput(jid);
+    if (!rideId) { await sendText(jid, 'No trip active. Use *ACCEPT* first.'); return; }
+    driverEvents.emit('ride:started', { rideId });
+    await sendText(jid, '▶️ Trip *started*. Drive safe!');
+    return;
+  }
+
+  if (lower === 'finish' || lower === '/finish' || lower.startsWith('finish ')) {
+    const rideId = resolveRideIdFromInput(jid);
+    if (!rideId) { await sendText(jid, 'No trip active.'); return; }
+    // Your server likely listens to driverEvents or detects finish elsewhere (meter, webhook)
+    driverEvents.emit('ride:finished', { rideId });
+    await sendText(jid, '✅ Trip *finished*. Thank you!');
+    return;
+  }
+
+  if (lower.startsWith('cancel')) {
+    const rideId = resolveRideIdFromInput(jid);
+    if (!rideId) { await sendText(jid, 'No trip active.'); return; }
+    const reason = txt.split(/\s+/).slice(1).join(' ').trim() || 'No reason';
+    // Try to load for event shape parity
+    const ride = await Ride.findById(rideId).lean().catch(() => null);
+    driverEvents.emit('ride:cancelled', { ride, reason, by: 'driver' });
+    await sendText(jid, '❌ Trip *cancelled*. We’ll find another rider soon.');
     return;
   }
 
@@ -359,18 +532,6 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // legacy: "ACCEPT <24hex>" still works
-  if (/^accept\s+[a-f0-9]{24}$/i.test(lower)) {
-    const rideId = txt.split(/\s+/)[1];
-    await tryAcceptRide(jid, rideId);
-    return;
-  }
-  if (/^(ignore|skip|decline)\s+[a-f0-9]{24}$/i.test(lower)) {
-    const rideId = txt.split(/\s+/)[1];
-    await tryIgnoreRide(jid, rideId);
-    return;
-  }
-
   // unrecognized → beginner-friendly help
   await sendText(
     jid,
@@ -379,6 +540,11 @@ async function handleTextMessage(jid, raw) {
     '2 — Go OFFLINE\n\n' +
     'Other commands:\n' +
     '• *Type your email address* to link your account (e.g. name@example.com)\n' +
+    '• *ARRIVED*, *START*, *FINISH*, *CANCEL <reason>*\n' +
+    '• *PLATE <text>*\n' +
+    '• *CAR <free text>*\n' +
+    '• *MAKE <make>*, *MODEL <model>*, *COLOR <color>*\n' +
+    '• *TYPE normal|comfort|luxury|xl*\n' +
     '• *STATS*, *WHOAMI*, *ACCEPT*, *IGNORE*\n' +
     'Tip: Keep *Share live location* on while ONLINE.'
   );
@@ -436,13 +602,27 @@ async function tryAcceptRide(jid, rideId) {
 
   const ride = await Ride.findById(rideId);
   if (!ride) { await sendText(jid, '❌ Ride not found.'); return; }
+
+  // If someone already accepted, don't override; basic guard
+  if (ride.status && ride.status !== 'pending' && ride.driverId && String(ride.driverId) !== String(driver._id)) {
+    await sendText(jid, '⚠️ This ride is no longer available.');
+    // clear pending if it was this one
+    const current = pendingRideByJid.get(jid);
+    if (current === rideId) {
+      pendingRideByJid.delete(jid);
+      const map = pendingShortByJid.get(jid);
+      if (map) for (const [k, v] of map) if (v === rideId) map.delete(k);
+    }
+    return;
+  }
+
   if (!ride.driverId) { ride.driverId = driver._id; }
   ride.status = 'accepted';
   await ride.save();
 
   await sendText(jid, '✅ You accepted the ride.');
 
-  // Notify system (same event path as Telegram)
+  // Notify system (same event path as Telegram/WA rider)
   driverEvents.emit('ride:accepted', {
     driverId: (Number.isFinite(Number(driver.chatId)) ? Number(driver.chatId) : (driver.phone || phoneFromJid(jid))),
     rideId
@@ -484,7 +664,7 @@ async function tryIgnoreRide(jid, rideId) {
 }
 
 /* -------------------- outbound API (export) -------------------- */
-export async function waNotifyDriverNewRequest({ to, driver, ride }) {
+export async function waNotifyDriverNewRequest({ to, driver, ride /*, riderContact*/ }) {
   const phone = to || driver?.phone;
   if (!phone) return;
 
@@ -495,21 +675,21 @@ export async function waNotifyDriverNewRequest({ to, driver, ride }) {
   setPendingFor(jid, ride._id);
 
   const short = String(ride._id).slice(-4).toLowerCase();
-  const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
+  const toMapLink = (pt) => (pt ? `https://maps.google.com/?q=${pt.lat},${pt.lng}` : null);
   const body =
     '🚗 *New Ride Request*\n' +
     `• Vehicle: *${(ride.vehicleType || 'normal').toUpperCase()}*\n` +
     (ride.estimate ? `• Estimate: *R${ride.estimate}*\n` : '') +
-    (ride.pickup ? `• Pickup: ${toMap(ride.pickup)}\n` : '') +
-    (ride.destination ? `• Drop:   ${toMap(ride.destination)}\n` : '') +
+    (ride.pickup ? `• Pickup: ${toMapLink(ride.pickup)}\n` : '') +
+    (ride.destination ? `• Drop:   ${toMapLink(ride.destination)}\n` : '') +
     '\n' +
     `Reply *ACCEPT* or *IGNORE* (or include code *${short}* if you have multiple).`;
 
-  // Try to send buttons; if it fails, fall back to text
   try {
-    await sendButtons(jid, body, String(ride._id));
+    await sendInteractive(jid, { body, rideId: String(ride._id) });
   } catch (e) {
-    logger.warn('[WA-DRIVER] buttons send failed, falling back to text: %s', e?.message || e);
+    // extra hard fallback (should rarely hit because sendInteractive already falls back to text)
+    logger.warn('[WA-DRIVER] all interactive sends failed, using plain text: %s', e?.message || e);
     await sendText(jid, body);
   }
 }
@@ -610,59 +790,66 @@ async function setupClient() {
           const jid = m.key?.remoteJid;
           if (fromMe || jid === 'status@broadcast') continue;
 
-          const msg = m.message || {};
+          // unwrap ephemeral wrapper if present
+          const container = m.message?.ephemeralMessage?.message ?? m.message ?? {};
+          const msg = container;
+
           if (
             msg.protocolMessage ||
             msg.reactionMessage ||
             msg.pollUpdateMessage ||
             msg.pollCreationMessage ||
-            msg.ephemeralMessage ||
             msg.viewOnceMessage ||
             msg.viewOnceMessageV2
           ) continue;
 
-          // cache pushName
-          if (m.pushName) driverNames.set(jid, m.pushName);
+          // Button/interactive replies (various Baileys message shapes)
+          const tplBtnId = msg?.templateButtonReplyMessage?.selectedId;
+          const legacyBtnId = msg?.buttonsResponseMessage?.selectedButtonId;
+          const flowId =
+            msg?.interactiveResponseMessage?.nativeFlowResponseMessage?.id ||
+            msg?.interactiveResponseMessage?.buttonReply?.id ||
+            msg?.interactiveResponseMessage?.listResponseMessage?.singleSelectReply?.selectedRowId;
+          const chosenId = tplBtnId || legacyBtnId || flowId || null;
 
-          // Button replies
-          const btn = msg.buttonsResponseMessage || msg.templateButtonReplyMessage || null;
-          if (btn?.selectedButtonId) {
-            const id = String(btn.selectedButtonId);
-            if (id.startsWith('accept_')) {
-              const rideId = id.slice('accept_'.length);
+          if (chosenId && typeof chosenId === 'string') {
+            if (chosenId.startsWith('accept_')) {
+              const rideId = chosenId.slice('accept_'.length);
               await tryAcceptRide(jid, rideId);
               continue;
             }
-            if (id.startsWith('ignore_')) {
-              const rideId = id.slice('ignore_'.length);
+            if (chosenId.startsWith('ignore_')) {
+              const rideId = chosenId.slice('ignore_'.length);
               await tryIgnoreRide(jid, rideId);
               continue;
             }
           }
 
-          // Location / Live Location / Text
-          const live = msg.liveLocationMessage || null;
-          const loc  = msg.locationMessage || null;
+          // Live location messages
+          const liveLoc = msg.liveLocationMessage || null;
+          if (liveLoc) { await handleLiveLocationMessage(jid, liveLoc); continue; }
+
+          // One-off location
+          const loc = msg.locationMessage || null;
+          if (loc) { await handleLocationMessage(jid, loc); continue; }
+
+          // Prefer caption text if media, else conversation
           let text =
             msg.conversation ||
             msg.extendedTextMessage?.text ||
             msg.imageMessage?.caption ||
-            msg.videoMessage?.caption || '';
-          text = (text || '').trim();
+            msg.videoMessage?.caption ||
+            msg.documentWithCaptionMessage?.message?.documentMessage?.caption ||
+            '';
 
-          if (live) { await handleLiveLocationMessage(jid, live); continue; }
-          if (loc)  { await handleLocationMessage(jid, loc); continue; }
+          text = (text || '').trim();
           if (text) { await handleTextMessage(jid, text); continue; }
+
+          // If nothing recognized, nudge basic help
+          await sendText(jid, 'Send *menu* for options, or *1* to go ONLINE.');
         } catch (e) {
-          console.error('[WA-DRIVER] handle error:', e);
-          try {
-            const rjid = m?.key?.remoteJid;
-            if (isJid(rjid)) {
-              await sendText(rjid, '⚠️ Error. Please try again.');
-            } else {
-              logger.warn('[WA-DRIVER] skip error reply, invalid JID: %s', rjid);
-            }
-          } catch {}
+          logger.warn('[WA-DRIVER] message handler error: %s', e?.message || e);
+          try { await sendText(m.key.remoteJid, '⚠️ Sorry, something went wrong. Try again.'); } catch {}
         }
       }
     });
@@ -674,20 +861,19 @@ async function setupClient() {
   }
 }
 
-/* -------------------- public control API -------------------- */
+/* -------------------- public exports -------------------- */
 export function initWhatsappDriverBot() {
   if (sock || initializing) {
     console.log('[WA-DRIVER] already initialized');
     return;
   }
-  console.log('🚀 Initializing WhatsApp *Driver* Bot…');
+  console.log('🚀 Initializing WhatsApp Driver Bot...');
   setupClient();
 }
 
 export function isWhatsAppDriverConnected() {
   return !!(sock && sock.ws && sock.ws.readyState === 1);
 }
-
 export function getDriverConnectionStatus() { return connState; }
 
 export async function waitForDriverQrDataUrl(timeoutMs = 25000) {
@@ -698,6 +884,10 @@ export async function waitForDriverQrDataUrl(timeoutMs = 25000) {
   });
 }
 
+export async function sendWhatsAppDriverMessage(jidOrPhone, text) {
+  return sendText(jidOrPhone, text);
+}
+
 export async function resetWhatsAppDriverSession() {
   try {
     if (sock) {
@@ -705,15 +895,10 @@ export async function resetWhatsAppDriverSession() {
       try { sock.end?.(); } catch {}
       sock = null;
     }
-    try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
     currentQR = null;
     connState = 'disconnected';
+    try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
   } finally {
     setupClient();
   }
-}
-
-/* -------------------- export a direct send for server dispatch -------------------- */
-export async function sendWhatsAppDriverMessage(toPhoneOrJid, text) {
-  return sendText(toPhoneOrJid, text);
 }

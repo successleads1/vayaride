@@ -53,6 +53,26 @@ const GMAPS_REGION = process.env.GOOGLE_MAPS_REGION || 'za';
 const ZA_CENTER = { lat: -28.4793, lng: 24.6727 };
 const ZA_RADIUS_M = 1_500_000;
 
+/* ---------- Phone normalization ---------- */
+const DEFAULT_CC = (process.env.DEFAULT_COUNTRY_CODE || '27').replace(/^\+/, ''); // e.g. "27"
+
+// Normalize various inputs to E.164 (+XXXXXXXX)
+function normalizePhone(raw) {
+  if (!raw) return null;
+  let s = String(raw).trim();
+  s = s.replace(/[^\d+]/g, '');
+  if (s.startsWith('+')) s = s.slice(1);
+  if (s.startsWith('00')) s = s.slice(2);
+  if (s.startsWith('0')) s = DEFAULT_CC + s.slice(1);
+  if (!/^\d{8,15}$/.test(s)) return null;
+  return `+${s}`;
+}
+
+function phoneFromJid(jid) {
+  const core = String(jid || '').split('@')[0];
+  return normalizePhone(core);
+}
+
 /* --------------- state --------------- */
 let sock = null;
 let initializing = false;
@@ -64,7 +84,7 @@ const waRideById = new Map();
 
 // per-JID wizard state
 // booking: { stage, pickup, destination, quotes, chosenVehicle, price, rideId, suggestions, addrSession }
-// registration: { stage: 'reg_name' | 'reg_email', temp: {name, email} }
+// registration: { stage: 'reg_name' | 'reg_email' | 'reg_phone', temp: {name, email}, _returnTo }
 // driverMenu: { stage: 'driver_menu' }
 const convo = new Map();
 
@@ -158,11 +178,49 @@ async function upsertWaRider(jid, { name = null, lastLocation = null } = {}) {
   const set = { lastSeenAt: new Date(), platform: 'whatsapp' };
   if (name) set.name = name;
   if (lastLocation) set.lastLocation = { ...lastLocation, ts: new Date() };
+
+  // Try to auto-set phone on first insert based on jid
+  const auto = phoneFromJid(jid);
+  const setOnInsert = { waJid: jid, platform: 'whatsapp' };
+  if (auto) { setOnInsert.phone = auto; setOnInsert.msisdn = auto; }
+
   await Rider.findOneAndUpdate(
     { waJid: jid },
-    { $set: set, $setOnInsert: { waJid: jid, platform: 'whatsapp' } },
+    { $set: set, $setOnInsert: setOnInsert },
     { upsert: true }
   );
+}
+
+/* ---------- Ensure rider has a phone ---------- */
+async function ensurePhonePresence({ jid, rider = null, state = null } = {}) {
+  try {
+    const r = rider || await Rider.findOne({ waJid: jid }).lean();
+    const existing = r?.phone || r?.msisdn;
+    if (existing) return 'ok';
+
+    // Try to infer from JID
+    const inferred = phoneFromJid(jid);
+    if (inferred) {
+      await Rider.findOneAndUpdate(
+        { waJid: jid },
+        { $set: { phone: inferred, msisdn: inferred, platform: 'whatsapp' } },
+        { upsert: true }
+      );
+      return 'autofilled';
+    }
+
+    // Ask the user once, and stay in this stage until valid phone is provided
+    const prev = state?.stage || 'idle';
+    convo.set(jid, { ...(state || {}), stage: 'reg_phone', _returnTo: prev });
+    await sendText(
+      jid,
+      `📱 Please reply with your *mobile number* in international format (e.g. +27XXXXXXXXX).\n` +
+      `We’ll save it so your driver can contact you if needed.`
+    );
+    return 'prompted';
+  } catch {
+    return 'ok';
+  }
 }
 
 /* ---------- Dashboard link for WA ---------- */
@@ -196,7 +254,7 @@ async function placesAutocomplete(input, sessionToken) {
   const params = {
     input: maybeBoosted,
     key: GOOGLE_MAPS_API_KEY,
-    components: GMAPS_COMPONENTS, // country:za
+    components: GMAPS_COMPONENTS,
     language: GMAPS_LANGUAGE,
     region: GMAPS_REGION,
     location: `${ZA_CENTER.lat},${ZA_CENTER.lng}`,
@@ -388,6 +446,31 @@ async function handleTextMessage(jid, raw) {
   const hasName = !!(rider?.name || waNames.get(jid));
   const hasEmail = !!rider?.email;
 
+  /* --- If phone is missing, ask once & hold flow until saved (except during name/email steps) --- */
+  if (state.stage !== 'reg_name' && state.stage !== 'reg_email') {
+    const ensured = await ensurePhonePresence({ jid, rider, state });
+    if (ensured === 'prompted') return;
+  }
+
+  // Accept phone input when we are in reg_phone stage
+  if ((convo.get(jid)?.stage) === 'reg_phone') {
+    const phone = normalizePhone(raw);
+    if (!phone) {
+      await sendText(jid, '❌ Please send a valid phone number like *+27XXXXXXXXX*.');
+      return;
+    }
+    await Rider.findOneAndUpdate(
+      { waJid: jid },
+      { $set: { phone, msisdn: phone, platform: 'whatsapp' } },
+      { upsert: true }
+    );
+    const prev = (convo.get(jid) || {})._returnTo || 'idle';
+    convo.set(jid, { stage: prev }); // resume previous stage
+    await sendText(jid, `✅ Saved your number: ${phone}`);
+    if (prev === 'idle') await sendMainMenu(jid);
+    return;
+  }
+
   // Driver quick-links
   if (txt === '/driver' || txt === 'driver') {
     await sendText(jid, `🧑‍✈️ *Driver Status*\nCheck your status or log in to your dashboard:\n${PUBLIC_URL}/driver`);
@@ -426,19 +509,16 @@ async function handleTextMessage(jid, raw) {
     }
     const name = state.temp?.name || waNames.get(jid) || 'New Rider';
 
-    // Upsert rider
     await Rider.findOneAndUpdate(
       { waJid: jid },
       { $set: { name, email, platform: 'whatsapp' } },
       { upsert: true }
     );
 
-    // Send dashboard link + done
     await sendDashboardLinkWA(jid);
     resetFlow(jid);
     await sendText(jid, `✅ Registration complete, ${name}!`);
 
-    // 🔔 Emails: thank the rider + notify admin
     try { await sendRiderWelcomeEmail(email, { name }); } catch (e) { console.warn('sendRiderWelcomeEmail failed:', e?.message || e); }
     try {
       await sendAdminNewRiderAlert({
@@ -449,6 +529,9 @@ async function handleTextMessage(jid, raw) {
         dashboardUrl: `${PUBLIC_URL}/admin/riders`
       });
     } catch (e) { console.warn('sendAdminNewRiderAlert failed:', e?.message || e); }
+
+    const ensured = await ensurePhonePresence({ jid, state: convo.get(jid) });
+    if (ensured === 'prompted') return;
 
     await sendMainMenu(jid);
     return;
@@ -501,7 +584,6 @@ async function handleTextMessage(jid, raw) {
     }
     if (txt === '3' || txt === 'support') {
       await sendText(jid, `🧑‍💼 *Support*\nEmail us at: ${SUPPORT_EMAIL}\nWe’ve also sent a note to our team — they’ll reach out if needed.`);
-      // Trigger support email
       try {
         const r = await Rider.findOne({ waJid: jid }).lean().catch(() => null);
         await triggerSupportEmail({ jid, rider: r, context: 'User selected Support (3)' });
@@ -717,7 +799,11 @@ async function handleLocationMessage(jid, locationMessage) {
   const lng = locationMessage.degreesLongitude;
 
   await upsertWaRider(jid, { lastLocation: { lat, lng } }).catch(() => {});
+
+  // Ensure phone before proceeding with booking by location
   const state = convo.get(jid) || { stage: 'idle' };
+  const ensured = await ensurePhonePresence({ jid, state });
+  if (ensured === 'prompted') return;
 
   if (state.stage === 'idle') { startBooking(jid); state.stage = 'await_pickup'; }
 
@@ -757,12 +843,71 @@ async function handleLocationMessage(jid, locationMessage) {
   }
 }
 
+/* --------- helpers for vehicle labels to rider --------- */
+function vtLabel(t) {
+  if (t === 'comfort') return 'Comfort';
+  if (t === 'luxury')  return 'Luxury';
+  if (t === 'xl')      return 'XL';
+  return 'Normal';
+}
+function carPretty(driver) {
+  const chunks = [];
+  if (driver?.vehicleName) chunks.push(driver.vehicleName);
+  else {
+    const mm = [driver?.vehicleMake, driver?.vehicleModel].filter(Boolean).join(' ');
+    if (mm) chunks.push(mm);
+  }
+  if (driver?.vehicleColor) chunks.push(`(${driver.vehicleColor})`);
+  return chunks.join(' ').trim();
+}
+const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
+
 /* --------------- Driver → WA rider notifications --------------- */
 driverEvents.on('ride:accepted', async ({ rideId }) => {
   const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
-  const link = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(rideId)}`;
-  try { await sendText(jid, `🚗 Your ride is on the way. Track here:\n${link}`); } catch {}
+
+  let ride = null;
+  let driver = null;
+  try {
+    ride = await Ride.findById(rideId).lean();
+    if (ride?.driverId) driver = await Driver.findById(ride.driverId).lean();
+  } catch {}
+
+  const liveLink = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(rideId)}`;
+  const pickupLink = ride?.pickup ? toMap(ride.pickup) : null;
+  const dropLink   = ride?.destination ? toMap(ride.destination) : null;
+
+  const dName   = driver?.name || 'Your driver';
+  const dType   = vtLabel(driver?.vehicleType);
+  const dPlate  = driver?.vehiclePlate || '—';
+  const dCar    = carPretty(driver) || 'Vehicle';
+  const dPhone  = driver?.phone || '—';
+  const rating  = (typeof driver?.stats?.avgRating === 'number')
+    ? `${Number(driver.stats.avgRating).toFixed(1)}★${typeof driver.stats.ratingsCount === 'number' ? ` (${driver.stats.ratingsCount})` : ''}`
+    : null;
+  const trips   = (typeof driver?.stats?.totalTrips === 'number') ? `${driver.stats.totalTrips} trips` : null;
+
+  const driverLoc = (driver?.location && typeof driver.location.lat === 'number' && typeof driver.location.lng === 'number')
+    ? toMap(driver.location)
+    : null;
+
+  const lines = [
+    '🚗 *Driver assigned*',
+    `• Name: ${dName}${rating ? ` — ${rating}` : ''}${trips ? ` · ${trips}` : ''}`,
+    `• Car: ${dCar} — ${dType}`,
+    `• Plate: ${dPlate}`,
+    `• Call/Text: ${dPhone}`,
+  ];
+
+  if (driverLoc) lines.push(`• Driver location: ${driverLoc}`);
+  if (pickupLink) lines.push(`• Pickup map: ${pickupLink}`);
+  if (dropLink)   lines.push(`• Drop map: ${dropLink}`);
+
+  lines.push('');
+  lines.push(`🗺️ Track live: ${liveLink}`);
+
+  try { await sendText(jid, lines.join('\n')); } catch {}
 });
 
 driverEvents.on('ride:arrived', async ({ rideId }) => {
