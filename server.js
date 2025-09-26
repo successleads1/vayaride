@@ -30,6 +30,8 @@ import payfastNotifyRouter from './src/routes/payfastNotify.js';
 import partnerRouter from './src/routes/partner.js';
 import payfastRouter from './src/routes/payfast.js';
 import payfastGatewayRouter from './src/routes/payfastGateway.js';
+import inviteRiderRouter from './src/routes/inviteRider.js';
+import riderRouter from './src/routes/rider.js'; // 🆕 NEW
 
 /* ---- Bots (Telegram) ---- */
 import { initRiderBot, riderEvents, riderBot as RB } from './src/bots/riderBot.js';
@@ -107,11 +109,15 @@ app.get('/qr.png', async (req, res) => {
   }
 });
 
+app.use('/', inviteRiderRouter);
+app.use('/api/rider', riderRouter); // 🆕 NEW: mount rider API (profile + referral + update)
+
 /* ---------------- Routes that need bodies first ---------------- */
 app.use('/api/payfast', payfastNotifyRouter);   // /api/payfast/notify (ITN)
 app.use('/api/payfast', payfastGatewayRouter);  // /api/payfast/gateway (auto-post to PayFast)
 app.use('/api/partner', partnerRouter);         // /api/partner/upgrade/payfast (landing page)
 app.use('/pay', payfastRouter);                 // /pay/:rideId → redirect to landing
+
 app.use(finishRouter);
 
 app.use(
@@ -233,10 +239,6 @@ async function backfillRiderPhoneIfMissing({ rider, ride }) {
 }
 
 async function resolveRiderContactFromRide(ride) {
-  // Try very hard to get the rider's phone:
-  // 1) Prefer Rider doc (phone fields or waJid)
-  // 2) Fallback to fields present on the Ride (riderWaJid / riderPhone / etc.)
-  // 3) If we find a phone and Rider is missing one, persist it (self-heal)
   if (!ride) return { name: 'Rider', phone: null, doc: null };
 
   let rider = null;
@@ -483,13 +485,6 @@ app.get('/api/wa-driver/status', (req, res) => {
   res.json({ status: getDriverConnectionStatus(), connected: isWhatsAppDriverConnected() });
 });
 
-/* ---------------- Legacy rider endpoint ---------------- */
-app.get('/api/rider/:chatId', async (req, res) => {
-  const rider = await Rider.findOne({ chatId: req.params.chatId });
-  if (!rider) return res.status(404).json({ error: 'Rider not found' });
-  res.json({ name: rider.name, email: rider.email, phone: pickPhoneLike(rider) || '', credit: rider.credit, trips: rider.trips || 0 });
-});
-
 /* ---------------- Telegram webhooks if used ---------------- */
 app.post('/rider-bot', (req, res) => { riderBot.processUpdate?.(req.body); res.sendStatus(200); });
 app.post('/driver-bot', (req, res) => { driverBot.processUpdate?.(req.body); res.sendStatus(200); });
@@ -567,6 +562,69 @@ app.get('/api/driver-last-loc/:chatId', async (req, res) => {
     res.json(driver.location);
   } catch {
     res.json({});
+  }
+});
+
+/* ---------------- Referral short link: /i/d/:code -> /driver/register?ref=CODE ---------------- */
+app.get('/i/d/:code', async (req, res) => {
+  const code = String(req.params.code || '').trim().toUpperCase();
+
+  // fire-and-forget: count the click if the code exists
+  try {
+    await Driver.updateOne(
+      { referralCode: code },
+      { $inc: { 'referralStats.clicks': 1 } }
+    );
+  } catch (e) {
+    console.warn('ref click bump failed:', e?.message || e);
+  }
+
+  const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  return res.redirect(302, `${base}/driver/register?ref=${encodeURIComponent(code)}`);
+});
+
+/* ---------------- Referral short link: /i/r/:code -> /register?ref=CODE ---------------- */
+app.get('/i/r/:code', async (req, res) => {
+  const code = String(req.params.code || '').trim().toUpperCase();
+
+  // fire-and-forget click count
+  try {
+    await Rider.updateOne(
+      { referralCode: code },
+      { $inc: { 'referralStats.clicks': 1 } }
+    );
+  } catch (e) {
+    console.warn('rider ref click bump failed:', e?.message || e);
+  }
+
+  const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  // send them to your rider registration page with ?ref=CODE
+  return res.redirect(302, `${base}/register?ref=${encodeURIComponent(code)}`);
+});
+
+/* ---------------- Rider referral admin/API helpers ---------------- */
+app.post('/api/rider/referral/ensure', async (req, res) => {
+  try {
+    const { riderId } = req.body || {};
+    if (!riderId) return res.status(400).json({ error: 'riderId required' });
+    const code = await Rider.ensureReferralCode(riderId);
+    return res.json({ ok: true, code });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'ensure failed' });
+  }
+});
+
+app.post('/api/rider/referral/mark-shared', async (req, res) => {
+  try {
+    const { riderId } = req.body || {};
+    if (!riderId) return res.status(400).json({ error: 'riderId required' });
+    await Rider.updateOne(
+      { _id: riderId },
+      { $set: { 'referralStats.lastSharedAt': new Date() } }
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'mark failed' });
   }
 });
 

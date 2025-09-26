@@ -31,7 +31,8 @@ h2{margin:0 0 10px;font-size:18px}
 .stars .fill::before{content:'★★★★★';letter-spacing:1px}
 .muted{color:var(--muted)}
 .kv{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.kv b{min-width:88px;display:inline-block}
+.kv b{min-width:110px;display:inline-block}
+.kvmini{display:grid;grid-template-columns:auto 1fr;gap:4px 10px}
 </style></head><body>
 <div class="layout">
   <aside>
@@ -53,7 +54,8 @@ h2{margin:0 0 10px;font-size:18px}
       <div class="grid">
         <div>
           <div class="kv"><b>Name:</b> <span><%= d.name %></span></div>
-          <div class="kv"><b>Email:</b> <span><%= d.email %></span></div>
+          <div class="kv"><b>Email:</b> <span><%= d.email || '—' %></span></div>
+          <div class="kv"><b>Phone:</b> <span><%= d.phone || '—' %></span></div>
           <div class="kv"><b>Vehicle:</b> <span><%= d.vehicleType || '-' %></span></div>
           <div class="kv"><b>Status:</b> <span class="badge"><%= d.status %></span></div>
 
@@ -68,6 +70,16 @@ h2{margin:0 0 10px;font-size:18px}
             </span>
             <span>&nbsp;<b><%= avg.toFixed(2) %></b> / 5</span>
             <span class="muted">(<%= cnt %> ratings)</span>
+          </div>
+
+          <div class="kv" style="margin-top:8px">
+            <b>Trips:</b>
+            <span><b><%= Number(d?.stats?.totalTrips||0) %></b> total •
+              cash <b><%= Number(d?.stats?.cashCount||0) %></b> • pay/app <b><%= Number(d?.stats?.payfastCount||0) %></b>
+              <% if (Number(d?.stats?.cashCount||0) >= 3) { %>
+                <span class="badge" style="margin-left:6px;background:#4d1a1a;border-color:#a33;color:#ffb3b3">MAX REACHED</span>
+              <% } %>
+            </span>
           </div>
 
           <% if (d.status === 'approved' && d.botPin) { %>
@@ -85,6 +97,22 @@ h2{margin:0 0 10px;font-size:18px}
           </form>
         </div>
       </div>
+    </section>
+
+    <!-- Banking details -->
+    <section class="card">
+      <h2>Banking</h2>
+      <% const b = d?.banking || {}; %>
+      <div class="kvmini">
+        <div><b>Account Holder:</b> <span><%= b.accountHolder || '—' %></span></div>
+        <div><b>Bank:</b> <span><%= b.bankName || '—' %></span></div>
+        <div><b>Account Type:</b> <span><%= b.accountType || '—' %></span></div>
+        <div><b>Account Number:</b> <span><%= b.accountNumber || '—' %></span></div>
+        <div><b>Branch / Universal:</b> <span><%= b.branchCode || '—' %></span></div>
+        <div><b>SWIFT/BIC:</b> <span><%= b.swift || '—' %></span></div>
+        <div><b>Updated:</b> <span><%= b.updatedAt ? new Date(b.updatedAt).toLocaleString() : '—' %></span></div>
+      </div>
+      <div class="muted" style="margin-top:6px;font-size:12px">These details are visible to admins only and used for payouts.</div>
     </section>
 
     <section class="card">

@@ -2,8 +2,15 @@
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Admin • Drivers</title>
 <style>
-:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222}
-*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+:root{
+  --bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;
+  --warn:#4d1a1a;--warn-border:#a33;
+  --accent:#1b3ea4;--danger:#a33;--ok:#00e676
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+a{color:#fff}
+
 .layout{display:flex;min-height:100vh}
 aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
 .brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
@@ -11,34 +18,54 @@ aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;paddin
 .brand h1{font-size:16px;margin:0}
 nav a{display:block;padding:10px;border-radius:8px;text-decoration:none;color:#fff;border:1px solid transparent}
 nav a:hover{background:#101010;border-color:#222}
+
 main{flex:1;padding:20px;display:grid;gap:16px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
 h2{margin:0 0 10px;font-size:18px}
+
 .table{width:100%;border-collapse:collapse}
-.table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left}
+.table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left;vertical-align:top}
+
 .filter{margin-bottom:12px;color:#bbb;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .input{background:#0b0b0b;border:1px solid var(--border);color:#fff;padding:10px 12px;border-radius:8px;min-width:240px}
-.btn{background:#111;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px;align-items:center}
+.btn{background:#111;border:1px solid #333;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px;align-items:center}
+.btn.small{font-size:12px;padding:6px 8px}
 .btn.danger{background:#250b0b;border-color:#661515}
-.btn.primary{background:#0b1433;border-color:#1b3ea4}
+.btn.primary{background:#0b1433;border-color:var(--accent)}
+.btn.light{background:#fff;border-color:#fff;color:#000;font-weight:800}
 .badge{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222}
+.badge.warn{background:var(--warn);border-color:var(--warn-border);color:#ffb3b3;font-weight:700}
+.small{font-size:12px;color:var(--muted)}
 .muted{color:var(--muted)}
+.kvmini{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:12px;color:#ddd}
+.kvmini .k{color:#aaa}
 .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .pager a, .pager span{padding:6px 10px;border-radius:8px;border:1px solid #222;text-decoration:none;color:#fff}
 .pager .current{background:#111}
 
-/* modal */
-.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:20px;z-index:999}
-.modal{background:#0f0f0f;border:1px solid var(--border);border-radius:12px;max-width:620px;width:100%;padding:16px}
+/* ===== MODALS ===== */
+.modal-backdrop{
+  position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:20px;z-index:999;
+  background:rgba(0,0,0,.6);backdrop-filter:blur(2px);
+}
+.modal{
+  width:min(680px,96vw);background:#0f0f0f;border:1px solid var(--border);border-radius:12px;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);padding:16px;transform:translateY(6px) scale(.98);opacity:0;
+  transition:.18s ease;
+}
+.modal-backdrop[style*="display: flex"] .modal{transform:translateY(0) scale(1);opacity:1}
 .modal h3{margin:0 0 10px}
-.modal .row{margin:8px 0;color:#ddd}
+.modal .row{margin:10px 0;color:#ddd}
 .modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:12px}
 .modal input[type="text"], .modal input[type="email"], .modal textarea, .modal select{
   width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px
 }
 .modal textarea{min-height:160px;resize:vertical}
-.small{font-size:12px;color:#aaa}
-</style></head><body>
+.modal .hint{font-size:12px;color:#aaa;margin-top:6px}
+.modal .danger{background:#250b0b;border-color:#661515}
+.modal .primary{background:#0b1433;border-color:var(--accent)}
+</style>
+</head><body>
 <div class="layout">
   <aside>
     <div class="brand">
@@ -62,7 +89,6 @@ h2{margin:0 0 10px;font-size:18px}
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <h2>Drivers</h2>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <!-- Bulk email + bulk delete -->
           <button class="btn primary" id="btn-bulk-email">Email Selected</button>
           <button class="btn danger" id="btn-bulk-del">Delete Selected</button>
         </div>
@@ -71,7 +97,7 @@ h2{margin:0 0 10px;font-size:18px}
       <!-- Search + status filter (same route) -->
       <form class="filter" method="GET" action="/admin/drivers" id="searchForm">
         <input class="input" type="text" name="q" id="q"
-               placeholder="Search name, email, vehicle, phone, or id…"
+               placeholder="Search name, email, phone, vehicle, or id…"
                value="<%= (typeof q !== 'undefined' ? q : '') %>" />
         <select class="input" name="status" id="status" style="min-width:160px">
           <option value="">All statuses</option>
@@ -90,21 +116,103 @@ h2{margin:0 0 10px;font-size:18px}
         <thead>
           <tr>
             <th><input type="checkbox" id="sel-all"/></th>
-            <th>Name</th><th>Email</th><th>Status</th><th>Vehicle</th><th>Joined</th><th>Action</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>Status</th>
+            <th>Vehicle</th>
+            <th>Trips</th>
+            <th>Cash</th>
+            <th>Banking</th>
+            <th>Referrals</th>
+            <th>Joined</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody>
           <% if (!drivers || drivers.length === 0) { %>
-            <tr><td colspan="7" class="muted">No drivers found.</td></tr>
+            <tr><td colspan="12" class="muted">No drivers found.</td></tr>
           <% } %>
-          <% (drivers || []).forEach(d => { %>
+          <% (drivers || []).forEach(d => {
+               const code = d.referralCode || '';
+               const clicks = (d.referralStats && d.referralStats.clicks) || 0;
+               const regs   = (d.referralStats && d.referralStats.registrations) || 0;
+               const sharedAt = (d.referralStats && d.referralStats.lastSharedAt) ? new Date(d.referralStats.lastSharedAt) : null;
+               const joined = new Date(d.createdAt);
+
+               const trips = Number(d?.stats?.totalTrips || 0);
+               const cashCount = Number(d?.stats?.cashCount || 0);
+               const maxReached = cashCount >= 3;
+
+               const bank = d?.banking || {};
+               const holder = bank.accountHolder || '';
+               const bankName = bank.bankName || '';
+               const acc = bank.accountNumber || '';
+               const branch = bank.branchCode || '';
+          %>
             <tr>
               <td><input type="checkbox" class="sel" value="<%= d._id %>" data-email="<%= d.email %>" data-name="<%= d.name %>"/></td>
               <td><%= d.name %></td>
-              <td><%= d.email %></td>
+              <td><%= d.email || '—' %></td>
+              <td><%= d.phone || '—' %></td>
               <td><span class="badge"><%= d.status %></span></td>
               <td><%= d.vehicleType || '-' %></td>
-              <td><%= new Date(d.createdAt).toLocaleString() %></td>
+
+              <!-- Trips -->
+              <td>
+                <div><b><%= trips %></b> total</div>
+                <div class="small">ratings: <%= Number(d?.stats?.ratingsCount||0) %></div>
+              </td>
+
+              <!-- Cash -->
+              <td>
+                <div><b><%= cashCount %></b> cash</div>
+                <% if (maxReached) { %>
+                  <div class="badge warn" title="Driver reached cash-trip limit">MAX REACHED</div>
+                <% } %>
+              </td>
+
+              <!-- Banking (compact) -->
+              <td>
+                <% if (bankName || acc || holder || branch) { %>
+                  <div class="kvmini">
+                    <span class="k">Holder:</span><span><%= holder || '—' %></span>
+                    <span class="k">Bank:</span><span><%= bankName || '—' %></span>
+                    <span class="k">Acc #:</span><span><%= acc || '—' %></span>
+                    <span class="k">Branch:</span><span><%= branch || '—' %></span>
+                  </div>
+                <% } else { %>
+                  <span class="muted">—</span>
+                <% } %>
+              </td>
+
+              <!-- Referrals column -->
+              <td>
+                <div class="refbox">
+                  <div class="refrow" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <% if (code) { %>
+                      <span class="badge" title="Referral code"><strong><%= code %></strong></span>
+                      <button class="btn small" data-action="copy-link" data-id="<%= d._id %>" data-code="<%= code %>">Copy Link</button>
+                      <button class="btn small" data-action="mark-shared" data-id="<%= d._id %>">Mark Shared Now</button>
+                      <button class="btn small danger" data-action="reset-ref" data-id="<%= d._id %>">Reset Stats</button>
+                    <% } else { %>
+                      <em class="muted">No code</em>
+                      <button class="btn small" data-action="ensure-code" data-id="<%= d._id %>">Generate Code</button>
+                    <% } %>
+                  </div>
+                  <% if (code) { %>
+                    <div class="small muted">Short link: <span class="link-preview" data-code="<%= code %>"></span></div>
+                    <div class="kvmini" style="margin-top:4px">
+                      <span class="k">Clicks:</span><span><%= clicks %></span>
+                      <span class="k">Regs:</span><span><%= regs %></span>
+                      <span class="k">Last:</span>
+                      <span><%= sharedAt ? sharedAt.toLocaleString() : '—' %></span>
+                    </div>
+                  <% } %>
+                </div>
+              </td>
+
+              <td><%= joined.toLocaleString() %></td>
               <td style="display:flex;gap:8px;flex-wrap:wrap">
                 <a class="btn" href="/admin/drivers/<%= d._id %>">Open</a>
                 <button class="btn primary btn-email" data-id="<%= d._id %>" data-email="<%= d.email %>" data-name="<%= d.name %>">Email</button>
@@ -150,6 +258,7 @@ h2{margin:0 0 10px;font-size:18px}
         <button type="button" class="btn" id="del-cancel">Cancel</button>
         <button type="submit" class="btn danger">Delete</button>
       </div>
+      <div class="hint">This action cannot be undone.</div>
     </form>
   </div>
 </div>
@@ -158,14 +267,11 @@ h2{margin:0 0 10px;font-size:18px}
 <div class="modal-backdrop" id="modal-email">
   <div class="modal">
     <h3>Send email to driver(s)</h3>
-
     <div class="row small" id="email-recipients-info">Recipient: —</div>
-
     <form id="email-form" method="POST" action="/admin/drivers/email">
       <input type="hidden" name="mode" id="email-mode" value="single"/>
       <input type="hidden" name="driverId" id="email-driverId" value=""/>
       <input type="hidden" name="selectedIds" id="email-selectedIds" value=""/>
-
       <div class="row">
         <label>Subject</label>
         <input type="text" name="subject" required placeholder="Subject"/>
@@ -174,7 +280,6 @@ h2{margin:0 0 10px;font-size:18px}
         <label>Message</label>
         <textarea name="message" required placeholder="Write your message…"></textarea>
       </div>
-
       <div class="actions">
         <button type="button" class="btn" id="email-cancel">Cancel</button>
         <button type="submit" class="btn primary">Send Email</button>
@@ -184,6 +289,9 @@ h2{margin:0 0 10px;font-size:18px}
 </div>
 
 <script>
+  // Expose base URL for short links
+  const PUBLIC_URL = "<%= typeof publicUrl !== 'undefined' ? publicUrl.replace(/\/$/, '') : '' %>" || window.location.origin;
+
   // Debounced search (same route)
   const q = document.getElementById('q');
   const statusSel = document.getElementById('status');
@@ -198,6 +306,12 @@ h2{margin:0 0 10px;font-size:18px}
   }
   q.addEventListener('input', debounce(go, 350));
   statusSel.addEventListener('change', go);
+
+  // Build short link previews
+  document.querySelectorAll('.link-preview').forEach(el => {
+    const code = el.dataset.code;
+    el.textContent = `${PUBLIC_URL}/i/d/${code}`;
+  });
 
   // Select all checkboxes
   const selAll = document.getElementById('sel-all');
@@ -243,7 +357,6 @@ h2{margin:0 0 10px;font-size:18px}
   /* ---------- Email modal logic ---------- */
   const modalEmail = document.getElementById('modal-email');
   const emailInfo = document.getElementById('email-recipients-info');
-  const emailForm = document.getElementById('email-form');
   const emailMode = document.getElementById('email-mode');
   const emailDriverId = document.getElementById('email-driverId');
   const emailSelectedIds = document.getElementById('email-selectedIds');
@@ -266,7 +379,6 @@ h2{margin:0 0 10px;font-size:18px}
     modalEmail.style.display = 'flex';
   }
   function closeEmailModal(){ modalEmail.style.display='none'; }
-
   emailCancel.addEventListener('click', closeEmailModal);
   modalEmail.addEventListener('click', (e)=>{ if (e.target === modalEmail) closeEmailModal(); });
 
@@ -283,6 +395,43 @@ h2{margin:0 0 10px;font-size:18px}
     const rows = Array.from(document.querySelectorAll('.sel:checked'));
     if (rows.length === 0) { alert('Select at least one driver to email.'); return; }
     openModalBulkEmail(rows);
+  });
+
+  /* ---------- Referral actions (admin control) ---------- */
+  async function postAction(url, body = null) {
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    try {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error('Request failed');
+      location.reload();
+    } catch (e) {
+      alert('Action failed. Please try again or check server logs.');
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const code = btn.dataset.code || '';
+    const action = btn.dataset.action;
+
+    if (action === 'copy-link') {
+      const link = `${PUBLIC_URL}/i/d/${code}`;
+      navigator.clipboard.writeText(link).then(
+        () => { btn.textContent = 'Copied!'; setTimeout(()=> btn.textContent='Copy Link', 1200); },
+        () => { prompt('Copy link:', link); }
+      );
+    } else if (action === 'ensure-code') {
+      postAction(`/admin/drivers/${encodeURIComponent(id)}/referral/ensure`);
+    } else if (action === 'mark-shared') {
+      postAction(`/admin/drivers/${encodeURIComponent(id)}/referral/mark-shared`);
+    } else if (action === 'reset-ref') {
+      if (confirm('Reset referral stats for this driver?')) {
+        postAction(`/admin/drivers/${encodeURIComponent(id)}/referral/reset`);
+      }
+    }
   });
 </script>
 </body></html>

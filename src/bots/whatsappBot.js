@@ -91,6 +91,14 @@ const convo = new Map();
 // rating-await map (jid -> rideId)
 const ratingAwait = new Map();
 
+/* --- referral: remembers pending code until registration completes --- */
+const pendingRefByJid = new Map(); // jid -> CODE
+function parseReferralFromText(t = '') {
+  const s = String(t).trim();
+  const m = /\bref(?:erral)?[\s_:=-]*([A-Z0-9]{4,12})\b/i.exec(s);
+  return m ? m[1].toUpperCase() : null;
+}
+
 /* --------------- helpers --------------- */
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
 
@@ -416,6 +424,10 @@ async function setupClient() {
           text = (text || '').trim();
           if (!loc && !text) continue;
 
+          // 👇 capture referral code from *first* inbound texts
+          const maybeCode = parseReferralFromText(text);
+          if (maybeCode) pendingRefByJid.set(jid, maybeCode);
+
           if (loc) { await handleLocationMessage(jid, loc); continue; }
 
           await handleTextMessage(jid, text);
@@ -514,6 +526,29 @@ async function handleTextMessage(jid, raw) {
       { $set: { name, email, platform: 'whatsapp' } },
       { upsert: true }
     );
+
+    // ✅ apply referral reward if pending
+    try {
+      const fresh = await Rider.findOne({ waJid: jid }).select('_id').lean();
+      const pending = pendingRefByJid.get(jid);
+      if (fresh?._id && pending) {
+        const referrer = await Rider.findOne({ referralCode: pending }).lean();
+        if (referrer?._id) {
+          await Rider.updateOne(
+            { _id: referrer._id },
+            {
+              $inc: { 'referralStats.registrations': 1 },
+              $set: {
+                nextDiscountPct: 0.2,
+                nextDiscountExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000)
+              }
+            }
+          );
+          await Rider.updateOne({ _id: fresh._id }, { $set: { referredBy: referrer._id } });
+        }
+      }
+    } catch {}
+    pendingRefByJid.delete(jid);
 
     await sendDashboardLinkWA(jid);
     resetFlow(jid);

@@ -50,13 +50,11 @@ function renderError(res, view, msg, extras = {}) {
 
 /** Normalize SA numbers to E.164 (+27XXXXXXXXX). Returns null if invalid. */
 function normalizePhoneZA(input = '') {
-  const d = String(input).replace(/\D/g, ''); // digits only
+  const d = String(input).replace(/\D/g, '');
   if (!d) return null;
   if (d.length === 10 && d.startsWith('0')) return `+27${d.slice(1)}`;
   if (d.length === 11 && d.startsWith('27')) return `+${d}`;
-  // Sometimes users paste 9 digits (missing the leading 0)
   if (d.length === 9) return `+27${d}`;
-  // Already E.164 with plus? (rare here because we stripped non-digits)
   return null;
 }
 
@@ -99,23 +97,40 @@ const DOC_FIELDS = [
   { name: 'idDocument',           maxCount: 1 },
   { name: 'vehicleRegistration',  maxCount: 1 },
   { name: 'driversLicense',       maxCount: 1 },
-  { name: 'insuranceCertificate', maxCount: 1 },
+  // { name: 'insuranceCertificate', maxCount: 1 }, // hidden
   { name: 'pdpOrPsv',             maxCount: 1 },
-  { name: 'dekraCertificate',     maxCount: 1 },
+  // { name: 'dekraCertificate',     maxCount: 1 }, // hidden
   { name: 'policeClearance',      maxCount: 1 },
   { name: 'licenseDisc',          maxCount: 1 }
 ];
-const DOC_KEYS = DOC_FIELDS.map(f => f.name);
+const DOC_KEYS = [
+  'driverProfilePhoto','vehiclePhoto','idDocument','vehicleRegistration',
+  'driversLicense',/*'insuranceCertificate',*/'pdpOrPsv',/*'dekraCertificate',*/
+  'policeClearance','licenseDisc'
+];
 
 /* ---------- Router ---------- */
 const router = express.Router();
+
+/* ---------------- Dashboard ---------------- */
+router.get('/', ensureAuth, async (req, res) => {
+  await Driver.ensureReferralCode(req.user._id);
+  const fresh = await Driver.findById(req.user._id).lean();
+
+  res.render('driver/dashboard', {
+    user: fresh,
+    ok: req.query.ok || '',
+    err: req.query.err || ''
+  });
+});
 
 /* ---------------- Register ---------------- */
 router.get('/register', ensureGuest, (req, res) => {
   res.render('driver/register', {
     error: req.query.err || null,
     publicUrl: getPublicUrl(req),
-    form: {}
+    form: {},
+    ref: (req.query.ref || '').trim()
   });
 });
 
@@ -129,9 +144,8 @@ router.post('/register', ensureGuest, async (req, res) => {
     const vehicleTypeRaw = String(req.body.vehicleType || '').toLowerCase();
     const publicUrl = getPublicUrl(req);
 
-    const keep = { name: nameRaw, email: emailRaw, phone: phoneRaw, vehicleType: vehicleTypeRaw };
+    const keep = { name: nameRaw, email: emailRaw, phone: phoneRaw, vehicleType: vehicleTypeRaw, ref: (req.body.ref || '').trim() };
 
-    // required checks
     if (!nameRaw || !emailRaw || !phoneRaw || !password || !confirm || !vehicleTypeRaw) {
       return renderError(res, 'driver/register', 'Please fill in all fields.', { publicUrl, form: keep });
     }
@@ -157,7 +171,6 @@ router.post('/register', ensureGuest, async (req, res) => {
       return renderError(res, 'driver/register', 'Invalid vehicle type', { publicUrl, form: keep });
     }
 
-    // unique checks
     const existing = await Driver.findOne({ $or: [{ email: emailRaw }, { phone: phoneE164 }] })
       .select('_id email phone')
       .lean();
@@ -166,7 +179,13 @@ router.post('/register', ensureGuest, async (req, res) => {
       return renderError(res, 'driver/register', msg, { publicUrl, form: keep, statusCode: 409 });
     }
 
-    // create
+    const refCodeRaw = String(req.body.ref || req.query.ref || '').trim().toUpperCase();
+    let referredById = null;
+    if (refCodeRaw) {
+      const ref = await Driver.findOne({ referralCode: refCodeRaw }).select('_id');
+      if (ref?._id) referredById = ref._id;
+    }
+
     const passwordHash = await bcrypt.hash(password, 12);
     const created = await Driver.create({
       name: nameRaw,
@@ -175,10 +194,23 @@ router.post('/register', ensureGuest, async (req, res) => {
       passwordHash,
       vehicleType: vehicleTypeRaw,
       status: 'pending',
-      isAvailable: false
+      isAvailable: false,
+      referredBy: referredById || undefined
     });
 
-    // emails (non-fatal)
+    try { await Driver.ensureReferralCode(created._id); } catch {}
+
+    if (referredById) {
+      try {
+        await Driver.updateOne(
+          { _id: referredById },
+          { $inc: { 'referralStats.registrations': 1 } }
+        );
+      } catch (e) {
+        console.warn('Failed to bump referrer registrations:', e?.message || e);
+      }
+    }
+
     try {
       await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw });
     } catch (e) {
@@ -197,7 +229,6 @@ router.post('/register', ensureGuest, async (req, res) => {
       console.error('Admin alert failed:', e?.message || e);
     }
 
-    // success → login
     return res.redirect(303, `/driver/login?justRegistered=1&email=${encodeURIComponent(emailRaw)}`);
   } catch (err) {
     if (err && err.code === 11000) {
@@ -209,7 +240,8 @@ router.post('/register', ensureGuest, async (req, res) => {
           name: (req.body?.name || '').trim(),
           email: (req.body?.email || '').trim().toLowerCase(),
           phone: (req.body?.phone || '').trim(),
-          vehicleType: (req.body?.vehicleType || '').trim().toLowerCase()
+          vehicleType: (req.body?.vehicleType || '').trim().toLowerCase(),
+          ref: (req.body?.ref || '').trim()
         },
         statusCode: 409
       });
@@ -221,7 +253,8 @@ router.post('/register', ensureGuest, async (req, res) => {
         name: (req.body?.name || '').trim(),
         email: (req.body?.email || '').trim().toLowerCase(),
         phone: (req.body?.phone || '').trim(),
-        vehicleType: (req.body?.vehicleType || '').trim().toLowerCase()
+        vehicleType: (req.body?.vehicleType || '').trim().toLowerCase(),
+        ref: (req.body?.ref || '').trim()
       },
       statusCode: 500
     });
@@ -242,16 +275,6 @@ router.post(
   passport.authenticate('local-driver', { failureRedirect: '/driver/login' }),
   (req, res) => res.redirect('/driver')
 );
-
-/* ---------------- Dashboard ---------------- */
-router.get('/', ensureAuth, async (req, res) => {
-  const fresh = await Driver.findById(req.user._id).lean();
-  res.render('driver/dashboard', {
-    user: fresh,
-    ok: req.query.ok || '',
-    err: req.query.err || ''
-  });
-});
 
 /* ---------------- Upload Docs ---------------- */
 router.get('/upload-docs', ensureAuth, (req, res) => res.redirect('/driver#docsForm'));
@@ -296,11 +319,10 @@ function extractCloudinaryInfo(url) {
     const u = new URL(url);
     const parts = u.pathname.split('/');
 
-    const resourceType = parts[2] || 'image'; // image/video/raw
+    const resourceType = parts[2] || 'image';
     const uploadIdx = parts.indexOf('upload');
     let after = parts.slice(uploadIdx + 1).join('/');
 
-    // remove version v123...
     if (after.startsWith('v') && /\dv\d*/.test(after.slice(0, 6))) {
       after = after.split('/').slice(1).join('/');
     }
@@ -336,7 +358,6 @@ router.post('/delete-doc', ensureAuth, async (req, res) => {
       catch (e) { console.warn('Cloudinary destroy failed (continuing):', e?.message || e); }
     }
 
-    // Remove from doc
     if (driver.documents?.set) driver.documents.set(key, undefined);
     await Driver.updateOne({ _id: driver._id }, { $unset: { [`documents.${key}`]: "" } });
 
@@ -360,6 +381,44 @@ router.post('/vehicle', ensureAuth, async (req, res) => {
   } catch (err) {
     console.error('Vehicle update error:', err);
     return res.redirect('/driver?err=Server%20error');
+  }
+});
+
+/* ---------------- Banking: save ---------------- */
+router.post('/banking', ensureAuth, async (req, res) => {
+  try {
+    const fields = {
+      accountHolder: String(req.body.accountHolder || '').trim(),
+      bankName:      String(req.body.bankName || '').trim(),
+      accountType:   String(req.body.accountType || '').trim(),
+      accountNumber: String(req.body.accountNumber || '').replace(/\D/g, ''),
+      branchCode:    String(req.body.branchCode || '').replace(/\D/g, ''),
+      swift:         String(req.body.swift || '').trim().toUpperCase()
+    };
+
+    // Basic validation
+    if (!fields.accountHolder || !fields.bankName || !fields.accountType || !fields.accountNumber || !fields.branchCode) {
+      return res.redirect('/driver?err=' + encodeURIComponent('Please complete all required banking fields.'));
+    }
+    if (!/^\d{6,17}$/.test(fields.accountNumber)) {
+      return res.redirect('/driver?err=' + encodeURIComponent('Invalid account number format.'));
+    }
+    if (!/^\d{6}$/.test(fields.branchCode)) {
+      return res.redirect('/driver?err=' + encodeURIComponent('Branch code must be 6 digits.'));
+    }
+    if (fields.swift && !/^[A-Z0-9]{8}([A-Z0-9]{3})?$/.test(fields.swift)) {
+      return res.redirect('/driver?err=' + encodeURIComponent('SWIFT/BIC must be 8 or 11 characters.'));
+    }
+
+    await Driver.updateOne(
+      { _id: req.user._id },
+      { $set: { banking: { ...fields, updatedAt: new Date() } } }
+    );
+
+    return res.redirect('/driver?ok=' + encodeURIComponent('Thank you for submitting your banking details.'));
+  } catch (e) {
+    console.error('Banking save error:', e);
+    return res.redirect('/driver?err=' + encodeURIComponent('Failed to save banking details.'));
   }
 });
 

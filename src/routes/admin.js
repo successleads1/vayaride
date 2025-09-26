@@ -48,6 +48,10 @@ function buildDriverFilter({ q, status }) {
   return filter;
 }
 
+const getPublicUrl = (req) =>
+  (process.env.PUBLIC_URL && process.env.PUBLIC_URL.replace(/\/$/, '')) ||
+  `${req.protocol}://${req.get('host')}`;
+
 /* ------------ auth screens ------------ */
 router.get('/login', ensureGuest, (req, res) => {
   res.render('admin/login', { err: req.query.err || '' });
@@ -134,6 +138,7 @@ router.get('/drivers', ensureAdmin, async (req, res) => {
       drivers,
       q,
       status,
+      publicUrl: getPublicUrl(req), // <-- pass base URL for short-link previews
       pagination: { total, page: pageNum, limit: pageSize, totalPages, sort: String(sort) }
     });
   } catch (e) {
@@ -145,10 +150,6 @@ router.get('/drivers', ensureAdmin, async (req, res) => {
 /* ------------ email selected / page / all-matching-search ------------ */
 router.post('/drivers/email', ensureAdmin, async (req, res) => {
   try {
-    // expected body:
-    // subject, message, mode: 'selected' | 'page' | 'search'
-    // selectedIds: comma-separated ObjectIds (when mode=selected)
-    // q, status, page, limit — to reconstruct scope when mode=page or search
     const subject = String(req.body.subject || '').trim();
     const message = String(req.body.message || '').trim();
     const mode = String(req.body.mode || 'selected');
@@ -186,14 +187,12 @@ router.post('/drivers/email', ensureAdmin, async (req, res) => {
       const q = typeof req.body.q === 'string' ? req.body.q : '';
       const status = typeof req.body.status === 'string' ? req.body.status : '';
       const filter = buildDriverFilter({ q, status });
-      // cap to 1000 to avoid abuse
       const all = await Driver.find(filter).limit(1000).select({ email: 1 }).lean();
       recipients = all.map(d => d.email).filter(Boolean);
     } else {
       return res.redirect('/admin/drivers?err=' + encodeURIComponent('Invalid mode'));
     }
 
-    // dedupe + validate
     recipients = Array.from(new Set(recipients.filter(Boolean)));
     if (recipients.length === 0) {
       return res.redirect('/admin/drivers?err=' + encodeURIComponent('No valid recipients in scope'));
@@ -315,12 +314,11 @@ router.post('/drivers/:id/delete', ensureAdmin, async (req, res) => {
 
     await Driver.deleteOne({ _id: d._id });
 
-    // Optional: broadcast admin activity feed
     const io = req.app.get('io');
     io?.emit('admin:activity', {
       type: 'driver_deleted',
       message: `Deleted driver ${d.name || d.email || d._id}`,
-      rideId: '', // none
+      rideId: '',
       createdAt: new Date()
     });
 
@@ -361,5 +359,45 @@ router.post('/drivers/bulk-delete', ensureAdmin, async (req, res) => {
   }
 });
 
+/* ===================== REFERRAL ADMIN ENDPOINTS ===================== */
+
+// POST /admin/drivers/:id/referral/ensure
+router.post('/drivers/:id/referral/ensure', ensureAdmin, async (req, res) => {
+  try {
+    await Driver.ensureReferralCode(req.params.id);
+    return res.redirect('back');
+  } catch (e) {
+    console.error('ensure referral code failed:', e);
+    return res.status(500).json({ ok: false, error: 'Failed to ensure referral code' });
+  }
+});
+
+// POST /admin/drivers/:id/referral/mark-shared
+router.post('/drivers/:id/referral/mark-shared', ensureAdmin, async (req, res) => {
+  try {
+    await Driver.updateOne(
+      { _id: req.params.id },
+      { $set: { 'referralStats.lastSharedAt': new Date() } }
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('mark-shared failed:', e);
+    return res.status(500).json({ ok: false, error: 'Failed to mark shared' });
+  }
+});
+
+// POST /admin/drivers/:id/referral/reset
+router.post('/drivers/:id/referral/reset', ensureAdmin, async (req, res) => {
+  try {
+    await Driver.updateOne(
+      { _id: req.params.id },
+      { $set: { 'referralStats.clicks': 0, 'referralStats.registrations': 0, 'referralStats.lastSharedAt': null } }
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('reset referral failed:', e);
+    return res.status(500).json({ ok: false, error: 'Failed to reset referral stats' });
+  }
+});
 
 export default router;

@@ -43,6 +43,35 @@ const ZA_RADIUS_M = 1_500_000;
 /* ---------------- In-memory state ---------------- */
 const riderState = new Map();
 
+/* --- referral (Telegram): pending code and applier --- */
+// remembers a pending referral code until the user completes registration
+const pendingRefByChat = new Map(); // chatId -> CODE
+
+// helper to apply reward to referrer and link new rider
+async function applyReferrerRewardByCode(code, newRiderId) {
+  const refCode = String(code || '').trim().toUpperCase();
+  if (!refCode) return false;
+
+  const referrer = await Rider.findOne({ referralCode: refCode }).lean();
+  if (!referrer?._id) return false;
+
+  // bump stats + grant 20% off for 30 days
+  await Rider.updateOne(
+    { _id: referrer._id },
+    {
+      $inc: { 'referralStats.registrations': 1 },
+      $set: {
+        nextDiscountPct: 0.2,
+        nextDiscountExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000)
+      }
+    }
+  );
+
+  // link who referred this new rider
+  await Rider.updateOne({ _id: newRiderId }, { $set: { referredBy: referrer._id } });
+  return true;
+}
+
 /* ---------------- Utils ---------------- */
 const crop = (s, n = 48) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '');
 const generatePIN = () => Math.floor(1000 + Math.random() * 9000).toString();
@@ -308,7 +337,7 @@ function wireRiderHandlers() {
   if (globalThis.__riderBotSingleton.wired) return;
   globalThis.__riderBotSingleton.wired = true;
 
-  // === NEW: when a driver accepts, inform the rider with driver details ===
+  // === when a driver accepts, inform the rider with driver details ===
   try {
     driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
       try {
@@ -339,9 +368,18 @@ function wireRiderHandlers() {
     console.warn('driverEvents subscription failed (riderBot):', e?.message || e);
   }
 
-  riderBot.onText(/\/start/i, async (msg) => {
+  // /start with optional payload ("start ref_CODE")
+  riderBot.onText(/\/start(?:\s+(.+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     riderState.delete(chatId);
+
+    // parse /start payload for ref_XXXX
+    const payload = (match && match[1]) ? String(match[1]).trim() : '';
+    const m = /^ref[_\s-]*([A-Z0-9]{4,12})$/i.exec(payload);
+    if (m) {
+      const code = m[1].toUpperCase();
+      pendingRefByChat.set(chatId, code);
+    }
 
     const rider = await Rider.findOneAndUpdate(
       { chatId },
@@ -428,6 +466,17 @@ function wireRiderHandlers() {
           },
           { upsert: true }
         );
+
+        // ✅ apply pending referral (if any)
+        try {
+          const fresh = await Rider.findOne({ chatId }).select('_id').lean();
+          const pending = pendingRefByChat.get(chatId);
+          if (fresh?._id && pending) {
+            await applyReferrerRewardByCode(pending, fresh._id);
+          }
+        } catch {}
+        pendingRefByChat.delete(chatId);
+
         riderState.delete(chatId);
         const link = `${PUBLIC_URL}/rider-dashboard.html?token=${dashboardToken}`;
         return riderBot.sendMessage(

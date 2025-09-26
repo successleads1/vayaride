@@ -13,7 +13,9 @@
     *{box-sizing:border-box}
     html,body{height:100%}
     body{
-      margin:0;background:var(--bg);color:var(--text);
+      margin:0;
+      background:radial-gradient(1200px 600px at 10% -10%, rgba(0,255,140,.05), transparent 60%) , var(--bg);
+      color:var(--text);
       font-family:system-ui, Segoe UI, Arial, sans-serif;
       -webkit-text-size-adjust:100%;
     }
@@ -47,7 +49,7 @@
     @media(min-width:960px){ main{grid-template-columns:1fr 1fr} }
 
     .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
-    h2{margin:0 0 12px;font-size:clamp(16px,2.5vw,18px)}
+    h2{margin:0 0 12px;font-size:clamp(16px,2.5vw,18px);display:flex;align-items:center;gap:10px}
     .muted{color:var(--muted)}
     .note{font-size:12px;color:#aaa;margin-top:6px}
 
@@ -75,12 +77,14 @@
       background:var(--accent);color:#000;font-weight:800;cursor:pointer;font-size:16px
     }
     button.primary:hover{filter:brightness(0.9)}
-    .btn, .btn-danger{
+    .btn, .btn-danger, .btn-ghost, .btn-light{
       appearance:none;border-radius:8px;border:1px solid var(--border);background:#111;color:#fff;padding:8px 12px;cursor:pointer
     }
     .btn:hover{filter:brightness(1.15)}
     .btn-danger{border-color:#532;background:#1a0000}
     .btn-danger:hover{filter:brightness(1.15);background:#220000}
+    .btn-ghost{background:transparent;border-color:#444}
+    .btn-light{background:#fff;border-color:#fff;color:#000;font-weight:800}
     .icon{font-style:normal;margin-right:6px}
 
     .banner{border:1px solid var(--border);padding:12px 14px;border-radius:10px;margin:10px 0;background:#0b0b0b}
@@ -129,6 +133,40 @@
       main{padding-left:max(16px, env(safe-area-inset-left)); padding-right:max(16px, env(safe-area-inset-right));}
     }
 
+    /* ===== Invite & Earn pulse ===== */
+    .h2-badge{
+      display:inline-flex;align-items:center;gap:8px;
+      background:rgba(0,255,128,.08);
+      border:1px solid rgba(0,255,128,.35);
+      color:#baffd6;padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700
+    }
+    .pulse-dot{width:12px;height:12px;border-radius:50%;background:var(--ok);position:relative}
+    .pulse-dot::after{
+      content:"";position:absolute;inset:-8px;border-radius:50%;
+      box-shadow:0 0 0 0 rgba(0,255,128,.55);
+      animation:pulse 1.8s infinite ease-out;
+    }
+    @keyframes pulse{
+      0%{box-shadow:0 0 0 0 rgba(0,255,128,.55)}
+      70%{box-shadow:0 0 0 14px rgba(0,255,128,0)}
+      100%{box-shadow:0 0 0 0 rgba(0,255,128,0)}
+    }
+    .earn-card{
+      position:relative;overflow:hidden;
+      background:linear-gradient(180deg, rgba(0,255,140,.06), transparent 55%), var(--card);
+    }
+    .stat .num{font-size:22px;font-weight:900}
+    .shine{
+      position:absolute;top:0;left:-150%;width:50%;height:100%;
+      background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.06) 50%, transparent 100%);
+      transform:skewX(-20deg);animation:shineMove 6s infinite;
+    }
+    @keyframes shineMove{
+      0%{left:-150%}
+      60%{left:140%}
+      100%{left:140%}
+    }
+
     /* ===== Modal (missing docs) ===== */
     .modal{
       position:fixed; inset:0; display:none; align-items:center; justify-content:center;
@@ -150,15 +188,29 @@
     .btn-ghost{ background:transparent; color:#fff; border:1px solid #444; border-radius:10px; padding:10px 14px; cursor:pointer }
     .miss-list{margin:10px 0 0; padding-left:20px;}
     .miss-list li{margin:4px 0}
+
+    /* ===== Invite card layout ===== */
+    .invite-grid{display:grid;grid-template-columns:1fr 220px;gap:14px;align-items:start}
+    @media (max-width: 900px){ .invite-grid{grid-template-columns:1fr} }
+    .share-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .share-row button{border:1px solid var(--border);background:#111;color:#fff;border-radius:8px;padding:10px 12px;cursor:pointer}
+    .share-row button:hover{filter:brightness(1.1)}
+    .code-box{display:flex;align-items:center;gap:8px}
+    .code-badge{display:inline-block;border:1px dashed #444;border-radius:10px;padding:6px 10px;letter-spacing:.08em;font-weight:800}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace}
+    .qr{width:100%;max-width:200px;height:auto;background:#fff;border-radius:12px;padding:8px;border:1px solid #333}
+    .stat{display:flex;align-items:center;gap:8px}
+    .stat .lbl{color:#bbb}
+    input.linkField{width:100%;padding:12px;border-radius:10px;border:1px dashed #444;background:#0f0f0f;color:#fff;font-family:inherit}
   </style>
 </head>
 
-<% 
-  // Server-side helpers for modal
+<%
   const docs = (user && user.documents) || {};
+  // Hidden: 'insuranceCertificate' and 'dekraCertificate'
   const requiredKeys = [
     'driverProfilePhoto','vehiclePhoto','idDocument','vehicleRegistration',
-    'driversLicense','insuranceCertificate','pdpOrPsv','dekraCertificate',
+    'driversLicense','pdpOrPsv',
     'policeClearance','licenseDisc'
   ];
   const labelMap = {
@@ -167,14 +219,27 @@
     idDocument:'National ID',
     vehicleRegistration:'Vehicle Registration',
     driversLicense:'Driver’s License',
-    insuranceCertificate:'Insurance Certificate',
+    // insuranceCertificate:'Insurance Certificate',
     pdpOrPsv:'PDP / PSV',
-    dekraCertificate:'DEKRA Certificate',
+    // dekraCertificate:'DEKRA Certificate',
     policeClearance:'Police Clearance',
     licenseDisc:'License Disc'
   };
   const missing = requiredKeys.filter(k => !docs[k]);
   const firstMissing = missing[0] || '';
+
+  // Referral
+  const refCode = (user && user.referralCode) || '';
+  const rStats = (user && user.referralStats) || {};
+  const clicks = Number(rStats.clicks || 0);
+  const regs   = Number(rStats.registrations || 0);
+  const lastSharedAt = rStats.lastSharedAt ? new Date(rStats.lastSharedAt) : null;
+
+  // Banking
+  const banking = (user && user.banking) || {};
+  const bankComplete =
+    !!(banking.accountHolder && banking.bankName && banking.accountType &&
+       banking.accountNumber && banking.branchCode);
 %>
 
 <body data-missing="<%= missing.length %>">
@@ -201,6 +266,57 @@
       <section class="banner err"><strong>❌ Error:</strong> <%= err %></section>
     <% } %>
 
+    <!-- ⭐ Invite & Earn (Top, with pulse) -->
+    <section class="card earn-card" style="grid-column: 1 / -1;">
+      <div class="shine" aria-hidden="true"></div>
+      <h2>
+        <span class="h2-badge"><span class="pulse-dot"></span> Invite &amp; Earn</span>
+      </h2>
+
+      <% if (!refCode) { %>
+        <p class="note">Your referral link will appear here. If it’s missing, please refresh or contact support.</p>
+      <% } %>
+
+      <div class="invite-grid">
+        <div>
+          <div class="code-box">
+            <span class="muted">Your code</span>
+            <span class="code-badge mono" id="refCode"><%= refCode || '— — — — — —' %></span>
+          </div>
+
+          <label style="margin-top:12px">Your invite link</label>
+          <input id="refLink" class="linkField mono" type="text" readonly value="" placeholder="https://…/i/d/CODE" />
+
+          <div class="share-row">
+            <button id="copyBtn" class="btn"><span class="icon">📋</span>Copy</button>
+            <button id="shareBtn" class="btn"><span class="icon">📤</span>Share</button>
+            <button id="openBtn" class="btn"><span class="icon">🔗</span>Open</button>
+            <span class="note" id="shareNote" style="margin-left:auto"></span>
+          </div>
+
+          <div class="share-row" style="margin-top:12px">
+            <div class="stat">
+              <span class="num"><%= clicks %></span>
+              <span class="lbl">link opens</span>
+            </div>
+            <div class="stat" style="margin-left:18px">
+              <span class="num"><%= regs %></span>
+              <span class="lbl">registrations</span>
+            </div>
+          </div>
+
+          <% if (lastSharedAt) { %>
+            <p class="note" id="lastShared">Last shared: <%= lastSharedAt.toLocaleString() %></p>
+          <% } %>
+        </div>
+
+        <div>
+          <img id="qrImg" class="qr" alt="Referral QR" src="" />
+          <p class="note" style="text-align:center;margin-top:6px">Scan to register as a driver</p>
+        </div>
+      </div>
+    </section>
+
     <!-- Profile -->
     <section class="card">
       <h2>Your Profile</h2>
@@ -226,7 +342,6 @@
         </div>
       </div>
 
-      <!-- 🔐 Telegram PIN banner -->
       <% if (user && user.status === 'approved' && user.botPin) { %>
         <div class="banner ok" style="margin-top:10px;border-left:4px solid #0f0;">
           <strong>Telegram PIN:</strong>
@@ -238,10 +353,65 @@
       <p class="note">If your status is <b>pending</b>, our team is reviewing your documents. You’ll be able to use the driver bot after approval.</p>
     </section>
 
+    <!-- Banking -->
+    <section class="card">
+      <h2>Banking Details</h2>
+      <p class="note">Add your payout details below. Your info is stored securely and used only for payments.</p>
+
+      <% if (bankComplete) { %>
+        <div class="banner ok" style="margin-bottom:10px">
+          ✅ Banking details are on file. Update below if anything changes.
+        </div>
+      <% } %>
+
+      <form action="/driver/banking" method="POST" novalidate>
+        <label>Account Holder</label>
+        <input name="accountHolder" required placeholder="Account holder name"
+               value="<%= banking.accountHolder || '' %>"/>
+
+        <label>Bank Name</label>
+        <select name="bankName" required>
+          <option value="">Select bank</option>
+          <% const banks = ['FNB','ABSA','Standard Bank','Nedbank','Capitec','TymeBank','African Bank','Discovery Bank','Other']; %>
+          <% banks.forEach(b => { %>
+            <option value="<%= b %>" <%= (banking.bankName===b ? 'selected' : '') %>><%= b %></option>
+          <% }) %>
+        </select>
+
+        <label>Account Type</label>
+        <select name="accountType" required>
+          <% const types = ['Cheque / Current','Savings']; %>
+          <option value="">Select type</option>
+          <% types.forEach(t => { %>
+            <option value="<%= t %>" <%= (banking.accountType===t ? 'selected' : '') %>><%= t %></option>
+          <% }) %>
+        </select>
+
+        <label>Account Number</label>
+        <input name="accountNumber" required inputmode="numeric" pattern="^\d{6,17}$"
+               title="6–17 digits" placeholder="e.g. 6204567890"
+               value="<%= banking.accountNumber || '' %>"/>
+
+        <label>Branch / Universal Code</label>
+        <input name="branchCode" required inputmode="numeric" pattern="^\d{6}$"
+               title="6 digits (e.g., 632005 for ABSA)" placeholder="e.g. 632005"
+               value="<%= banking.branchCode || '' %>"/>
+        <div class="hint">For most SA banks, the universal branch code works (e.g., 632005 for ABSA).</div>
+
+        <label>SWIFT/BIC (optional)</label>
+        <input name="swift" pattern="^[A-Za-z0-9]{8}([A-Za-z0-9]{3})?$"
+               title="8 or 11 letters/numbers"
+               placeholder="e.g. FIRNZAJJ"
+               value="<%= banking.swift || '' %>"/>
+
+        <button type="submit" class="primary">Save Banking Details</button>
+        <p class="note">Thank you for submitting your banking details. We’ll notify you if we need additional verification for payouts.</p>
+      </form>
+    </section>
+
     <!-- Documents on file -->
     <section class="card" id="docs" style="grid-column: 1 / -1;">
       <h2>Documents on File</h2>
-      <% /* expose to table */ %>
       <% const tableDocs = docs; %>
       <table class="docs">
         <thead>
@@ -259,9 +429,9 @@
             ['idDocument','National ID'],
             ['vehicleRegistration','Vehicle Registration'],
             ['driversLicense','Driver’s License'],
-            ['insuranceCertificate','Insurance Certificate'],
+            // ['insuranceCertificate','Insurance Certificate'],  // hidden
             ['pdpOrPsv','PDP / PSV'],
-            ['dekraCertificate','DEKRA Certificate'],
+            // ['dekraCertificate','DEKRA Certificate'],         // hidden
             ['policeClearance','Police Clearance'],
             ['licenseDisc','License Disc'],
           ]; %>
@@ -331,14 +501,16 @@
         <label>Driver's License <span class="size-tag" id="sz_driversLicense"></span></label>
         <input type="file" name="driversLicense" accept="image/*,application/pdf" <%= docs.driversLicense ? '' : 'required' %> />
 
+        <!-- Vehicle Insurance Certificate (hidden)
         <label>Vehicle Insurance Certificate <span class="size-tag" id="sz_insuranceCertificate"></span></label>
-        <input type="file" name="insuranceCertificate" accept="image/*,application/pdf" <%= docs.insuranceCertificate ? '' : 'required' %> />
+        <input type="file" name="insuranceCertificate" accept="image/*,application/pdf" <%= docs.insuranceCertificate ? '' : 'required' %> /> -->
 
         <label>Professional Driving Permit (PDP/PSV) <span class="size-tag" id="sz_pdpOrPsv"></span></label>
         <input type="file" name="pdpOrPsv" accept="image/*,application/pdf" <%= docs.pdpOrPsv ? '' : 'required' %> />
 
+        <!-- DEKRA Certificate (hidden)
         <label>DEKRA Certificate <span class="size-tag" id="sz_dekraCertificate"></span></label>
-        <input type="file" name="dekraCertificate" accept="image/*,application/pdf" <%= docs.dekraCertificate ? '' : 'required' %> />
+        <input type="file" name="dekraCertificate" accept="image/*,application/pdf" <%= docs.dekraCertificate ? '' : 'required' %> /> -->
 
         <label>Police Clearance (Good Conduct) <span class="size-tag" id="sz_policeClearance"></span></label>
         <input type="file" name="policeClearance" accept="image/*,application/pdf" <%= docs.policeClearance ? '' : 'required' %> />
@@ -379,6 +551,55 @@
   </div>
 
   <script>
+    // ---- Invite UI wiring ----
+    (function(){
+      const code = document.getElementById('refCode')?.textContent?.trim();
+      const linkField = document.getElementById('refLink');
+      const copyBtn = document.getElementById('copyBtn');
+      const shareBtn = document.getElementById('shareBtn');
+      const openBtn = document.getElementById('openBtn');
+      const shareNote = document.getElementById('shareNote');
+      const qrImg = document.getElementById('qrImg');
+
+      if (code && code.replace(/[-—\s]/g,'').length >= 4) {
+        const origin = location.origin;
+        const link = origin + '/i/d/' + encodeURIComponent(code);
+        if (linkField) linkField.value = link;
+        if (qrImg) qrImg.src = '/qr.png?u=' + encodeURIComponent('/i/d/' + code);
+
+        copyBtn?.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(link);
+            shareNote.textContent = 'Copied!';
+            setTimeout(()=> shareNote.textContent = '', 1600);
+          } catch { alert('Copy failed'); }
+        });
+
+        shareBtn?.addEventListener('click', async () => {
+          try {
+            if (navigator.share) {
+              await navigator.share({
+                title: 'Join VayaRide as a Driver',
+                text: 'Sign up to drive with VayaRide. Use my invite link:',
+                url: link
+              });
+            } else {
+              await navigator.clipboard.writeText(link);
+              alert('Link copied (native share not available).');
+            }
+            const el = document.getElementById('lastShared');
+            if (el) el.textContent = 'Last shared: ' + new Date().toLocaleString();
+          } catch {}
+        });
+
+        openBtn?.addEventListener('click', () => window.open(link, '_blank', 'noopener'));
+      } else {
+        document.querySelectorAll('.share-row button').forEach(b => b.disabled = true);
+        if (qrImg) qrImg.style.opacity = .4;
+        if (linkField) linkField.placeholder = 'Referral link unavailable';
+      }
+    })();
+
     // ---- Client-side image compression + size display ----
     const MAX_UPLOAD = 10 * 1024 * 1024; // 10MB
     const TARGET_MAX_W = 1800;
@@ -436,7 +657,7 @@
       });
     });
 
-    document.getElementById('docsForm').addEventListener('submit', (e) => {
+    document.getElementById('docsForm')?.addEventListener('submit', (e) => {
       const inputs = e.currentTarget.querySelectorAll('input[type="file"]');
       for (const input of inputs) {
         const f = input.files && input.files[0];
@@ -482,14 +703,11 @@
       if (missingCount > 0){
         openModal('missing-docs-modal');
       }
-      // Upload CTA scrolls to the form and focuses the first missing field (if we can)
       const goBtn = document.getElementById('goUploadBtn');
       goBtn?.addEventListener('click', ()=>{
         closeModal(document.getElementById('missing-docs-modal'));
         const form = document.getElementById('docsForm');
         form?.scrollIntoView({ behavior:'smooth', block:'start' });
-
-        // Focus the first missing input if we can (server injected id below)
         const firstMissingKey = "<%= firstMissing %>";
         if (firstMissingKey){
           const input = form?.querySelector(`input[name="${firstMissingKey}"]`);

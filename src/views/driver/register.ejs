@@ -26,6 +26,9 @@
     <% } %>
 
     <form method="POST" action="/driver/register" id="regForm" autocomplete="on">
+      <!-- 🔒 keep referral code if present -->
+      <input type="hidden" name="ref" value="<%= (typeof ref !== 'undefined' && ref) ? ref : (form && form.ref) || '' %>" />
+
       <label for="name">Full name</label>
       <input id="name" name="name" required
              value="<%= form && form.name ? form.name : '' %>" />

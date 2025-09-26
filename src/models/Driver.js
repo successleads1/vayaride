@@ -29,6 +29,17 @@ const DriverStatsSchema = new mongoose.Schema({
   ratingsCount:    { type: Number, default: 0 }
 }, { _id: false });
 
+/* ---------------- banking subdoc ---------------- */
+const BankingSchema = new mongoose.Schema({
+  accountHolder: { type: String, trim: true },
+  bankName:      { type: String, trim: true },              // e.g., FNB, ABSA, Standard Bank
+  accountType:   { type: String, trim: true },              // Cheque / Savings / Current
+  accountNumber: { type: String, trim: true },              // digits only
+  branchCode:    { type: String, trim: true },              // 6-digit universal (e.g., 632005)
+  swift:         { type: String, trim: true },              // optional (8 or 11 chars)
+  updatedAt:     { type: Date }
+}, { _id: false });
+
 /* ---------------- main driver schema ---------------- */
 const DriverSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -36,18 +47,15 @@ const DriverSchema = new mongoose.Schema({
   email: { type: String, index: true, unique: true, sparse: true },
   passwordHash: { type: String },
 
-  // cellphone (unique, normalized to E.164 like +27xxxxxxxxx)
   phone: { type: String, index: true, unique: true, sparse: true },
 
-  // Vehicle meta
   vehicleType: { type: String, enum: ['normal', 'comfort', 'luxury', 'xl'], default: 'normal' },
 
-  // NEW — driver-editable vehicle details
   vehicleMake:  { type: String },
   vehicleModel: { type: String },
   vehicleColor: { type: String },
-  vehicleName:  { type: String }, // free-text alternative (e.g., "Toyota Corolla")
-  vehiclePlate: { type: String, index: true, sparse: true }, // not unique to avoid conflicts in dev
+  vehicleName:  { type: String },
+  vehiclePlate: { type: String, index: true, sparse: true },
 
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
 
@@ -72,11 +80,23 @@ const DriverSchema = new mongoose.Schema({
     idDocument: String,
     vehicleRegistration: String,
     driversLicense: String,
-    insuranceCertificate: String,
+    insuranceCertificate: String, // kept in schema for backward-compat
     pdpOrPsv: String,
-    dekraCertificate: String,
+    dekraCertificate: String,     // kept in schema for backward-compat
     policeClearance: String,
     licenseDisc: String
+  },
+
+  /* ---------- Banking ---------- */
+  banking: { type: BankingSchema, default: () => ({}) },
+
+  /* ---------- Referrals ---------- */
+  referralCode: { type: String, index: true, unique: true, sparse: true },
+  referredBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'Driver', index: true },
+  referralStats: {
+    clicks:        { type: Number, default: 0 },
+    registrations: { type: Number, default: 0 },
+    lastSharedAt:  { type: Date }
   },
 
   stats: { type: DriverStatsSchema, default: () => ({}) }
@@ -152,6 +172,28 @@ DriverSchema.statics.computeAndUpdateStats = async function (driverId) {
 
   await this.updateOne({ _id: driverIdObj }, { $set: updates });
   return updates;
+};
+
+/* ---------------- static: ensure referral code ---------------- */
+DriverSchema.statics.ensureReferralCode = async function (driverId) {
+  const id = typeof driverId === 'string' ? new mongoose.Types.ObjectId(driverId) : driverId;
+  const doc = await this.findById(id).select('_id referralCode name').lean();
+  if (!doc) return null;
+  if (doc.referralCode) return doc.referralCode;
+
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  const tail = String(doc._id).slice(-4).toUpperCase();
+  const code = `${rand}${tail}`;
+
+  try {
+    await this.updateOne({ _id: doc._id }, { $set: { referralCode: code } });
+    return code;
+  } catch (e) {
+    const alt = Math.random().toString(36).slice(2, 8).toUpperCase()
+      + Date.now().toString(36).slice(-2).toUpperCase();
+    await this.updateOne({ _id: doc._id }, { $set: { referralCode: alt } });
+    return alt;
+  }
 };
 
 export default mongoose.model('Driver', DriverSchema);

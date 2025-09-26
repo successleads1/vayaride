@@ -12,67 +12,71 @@ const PointSchema = new mongoose.Schema(
 
 const RideSchema = new mongoose.Schema(
   {
-    // Rider identities
+    /* ---------- Rider identities ---------- */
     riderChatId: Number,          // Telegram (legacy)
     riderWaJid: { type: String }, // WhatsApp JID
 
-    // Driver
+    /* ---------- Driver ---------- */
     driverId: { type: mongoose.Schema.Types.ObjectId, ref: 'Driver' },
     driverChatId: { type: Number }, // quick access for bot/sockets
 
-    // Route
+    /* ---------- Route ---------- */
     pickup: { lat: Number, lng: Number },
     destination: { lat: Number, lng: Number },
 
-    // Quoting / vehicle
+    /* ---------- Quoting / vehicle ---------- */
     estimate: Number,
     vehicleType: { type: String },
 
-    // Payment
+    /* ✅ Promo (optional; for referral discounts, etc.) */
+    promoDiscountPct:   { type: Number, default: 0 },      // e.g. 0.2 for 20%
+    promoDiscountReason:{ type: String, default: null },   // e.g. 'referral'
+
+    /* ---------- Payment ---------- */
     paymentMethod: { type: String, enum: ['cash', 'payfast', 'app', 'paypal'], default: 'cash' },
 
-    // Payment tracking
+    /* ---------- Payment tracking ---------- */
     paymentStatus: { type: String, enum: ['unpaid', 'paid'], default: 'unpaid' },
     paidAt: { type: Date },
 
-    // Lifecycle
+    /* ---------- Lifecycle ---------- */
     status: {
       type: String,
       enum: ['pending', 'accepted', 'enroute', 'completed', 'cancelled', 'payment_pending'],
       default: 'pending'
     },
 
-    // Cancel details (keep both names for compatibility)
-    cancelReason: { type: String },            // legacy name
-    cancellationReason: { type: String },      // new, matches server code
+    /* ---------- Cancel details (compat names) ---------- */
+    cancelReason: { type: String },       // legacy name
+    cancellationReason: { type: String }, // new, matches server code
     cancellationNote: { type: String },
     cancelledAt: { type: Date },
     cancelledBy: { type: String, enum: ['driver', 'rider', 'system'], default: undefined },
 
-    // NEW: capture where & how far when cancelled
+    /* NEW: capture where & how far when cancelled */
     cancelDriverLoc: { lat: Number, lng: Number }, // last driver coords when cancelled
-    cancelDistanceKm: { type: Number },            // distance from pickup to cancel point (km, ~2 decimals)
+    cancelDistanceKm: { type: Number },            // ~km from pickup to cancel point
 
-    // Time markers
+    /* ---------- Time markers ---------- */
     startedAt: { type: Date },
     pickedAt: { type: Date },
     completedAt: { type: Date },
 
-    // Final fare snapshot (set on finish)
-    finalAmount: { type: Number },         // R amount actually charged
-    finalDistanceKm: { type: Number },     // computed trip km
-    finalDurationSec: { type: Number },    // actual duration sec
-    finalTrafficFactor: { type: Number },  // ratio actual/expected
-    finalSurge: { type: Number },          // surge used at finish
+    /* ---------- Final fare snapshot (set on finish) ---------- */
+    finalAmount: { type: Number },        // R amount actually charged
+    finalDistanceKm: { type: Number },    // computed trip km
+    finalDurationSec: { type: Number },   // actual duration sec
+    finalTrafficFactor: { type: Number }, // ratio actual/expected
+    finalSurge: { type: Number },         // surge used at finish
 
-    // Breadcrumbs
+    /* ---------- Breadcrumbs ---------- */
     path: [PointSchema],        // driver breadcrumb (we append final/cancel stamp here)
     viewerPath: [PointSchema],  // optional breadcrumb from viewers
 
-    // Source platform (for notifications)
+    /* ---------- Source platform (for notifications) ---------- */
     platform: { type: String, enum: ['telegram', 'whatsapp', null], default: null },
 
-    // RATINGS
+    /* ---------- RATINGS ---------- */
     // rider → driver
     driverRating: { type: Number, min: 1, max: 5, default: null },
     driverRatedAt: { type: Date, default: null },
@@ -80,7 +84,7 @@ const RideSchema = new mongoose.Schema(
     riderRating: { type: Number, min: 1, max: 5, default: null },
     riderRatedAt: { type: Date, default: null },
 
-    // ⭐ Arrival dedupe (durable, survives restarts)
+    /* ⭐ Arrival dedupe (durable, survives restarts) */
     arrivedNotified: { type: Boolean, default: false }, // one-shot flag
     arrivedAt: { type: Date, default: null },           // when first marked arrived
     _lastArriveEmitAt: { type: Date, default: null }    // small cooldown to avoid bursts

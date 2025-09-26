@@ -13,7 +13,7 @@
     }
     .container { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 20px; height: 100%; overflow: hidden; }
     .logo { width: 100px; height: 100px; border-radius: 50%; border: 3px solid #fff; object-fit: cover; margin-bottom: 10px; }
-    .card { width: 100%; max-width: 600px; background: #1a1a1a; padding: 20px; border-radius: 10px; box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); overflow-y: auto; }
+    .card { width: 100%; max-width: 600px; background: #1a1a1a; padding: 20px; border-radius: 10px; box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); overflow-y: auto; max-height: calc(100vh - 170px); }
     h2, h3 { text-align: center; }
     p, label { margin: 10px 0 5px; }
     input, button { width: 100%; padding: 12px; border: none; border-radius: 5px; margin-bottom: 15px; font-size: 16px; }
@@ -28,7 +28,7 @@
     #pinModal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.95); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px; }
     #pinModal form { background: #1a1a1a; padding: 30px; border-radius: 10px; text-align: center; box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); max-width: 300px; width: 100%; }
     #pinModal input { font-size: 24px; text-align: center; letter-spacing: 8px; margin-bottom: 10px; }
-    #pinMsg { color: #ff4d4d; font-size: 14px; }
+    #pinMsg { color: #ff4d4d; font-size: 14px; min-height: 18px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .stat { background:#111; border:1px solid #2a2a2a; border-radius:8px; padding:12px; text-align:center; }
     .stat .label { color:#aaa; font-size:12px; }
@@ -92,6 +92,32 @@
       </form>
 
       <p id="message" style="text-align:center;"></p>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid #333;">
+
+      <!-- 🎁 Refer & Save block -->
+      <h3>🎁 Refer & Save (20% off)</h3>
+      <p class="muted">Share your link. When a friend signs up, you get <b>20% off</b> your next trip.</p>
+
+      <div id="referralBlock" style="background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="refLink" type="text" readonly value="Loading..." style="flex:1;min-width:220px">
+          <button id="copyRef" type="button">📋 Copy</button>
+          <a id="openQR" href="/qr.png" target="_blank" rel="noopener" class="back-btn" style="margin:0">Show QR</a>
+        </div>
+        <div class="grid" style="margin-top:10px">
+          <div class="stat">
+            <div class="label">Clicks</div>
+            <div id="refClicks" class="value">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Registrations</div>
+            <div id="refRegs" class="value">0</div>
+          </div>
+        </div>
+        <div id="discountRow" class="muted" style="margin-top:10px">No discount yet.</div>
+      </div>
+
     </div>
 
     <a href="https://t.me/vayarider_bot" class="back-btn">⬅️ Back to Telegram</a>
@@ -110,6 +136,13 @@
   <script>
     const token = new URLSearchParams(window.location.search).get('token');
 
+    // If user opened the page without a token, show a helpful message.
+    if (!token) {
+      document.getElementById('pinModal').style.display = 'flex';
+      const pinMsg = document.getElementById('pinMsg');
+      pinMsg.textContent = 'No token provided. Please open this page from your secure dashboard link.';
+    }
+
     function fmtMethod(m) {
       if (!m) return '—';
       return (m === 'payfast') ? 'Card (PayFast)' : (m === 'cash' ? 'Cash' : m);
@@ -121,7 +154,6 @@
       return dt.toLocaleString();
     }
     function renderStars(avg) {
-      // 0..5, show filled/empty stars (no halves for simplicity)
       const rounded = Math.round(Number(avg || 0));
       const filled = '★'.repeat(Math.min(5, Math.max(0, rounded)));
       const empty = '★'.repeat(5 - Math.min(5, Math.max(0, rounded)));
@@ -190,12 +222,52 @@
           ratingMetaEl.textContent = 'No ratings yet';
         }
 
+        /* 🔗 Load referral + discount info for this chatId */
+        const chatId = data.chatId ?? null;
+        if (chatId != null) {
+          const res2 = await fetch(`/api/rider/${encodeURIComponent(chatId)}`);
+          const info = await res2.json();
+
+          // share link + stats
+          const refLink = document.getElementById('refLink');
+          const refClicks = document.getElementById('refClicks');
+          const refRegs = document.getElementById('refRegs');
+          const openQR = document.getElementById('openQR');
+
+          if (info?.referral?.link) {
+            refLink.value = info.referral.link;
+            // QR for same-domain path only
+            try {
+              const u = new URL(info.referral.link);
+              openQR.href = `/qr.png?u=${encodeURIComponent(u.pathname)}`;
+            } catch {
+              openQR.href = '/qr.png';
+            }
+          } else {
+            refLink.value = '—';
+          }
+          refClicks.textContent = info?.referral?.clicks || 0;
+          refRegs.textContent = info?.referral?.registrations || 0;
+
+          // discount line
+          const drow = document.getElementById('discountRow');
+          const pct = Number(info?.discount?.pct || 0);
+          if (pct > 0) {
+            const exp = info?.discount?.expiresAt ? new Date(info.discount.expiresAt) : null;
+            const when = exp && !isNaN(exp.getTime()) ? ` (expires ${exp.toLocaleDateString()})` : '';
+            drow.innerHTML = `✅ <b>${Math.round(pct*100)}% off</b> will be applied to your next trip${when}.`;
+          } else {
+            drow.textContent = 'No discount yet. Share your link to earn 20% off your next trip!';
+          }
+        }
+
       } catch (err) {
         console.error('🔐 PIN verify error:', err);
-        pinMsg.textContent = err.message || "❌ Access denied or expired.";
+        document.getElementById('pinMsg').textContent = err.message || "❌ Access denied or expired.";
       }
     }
 
+    // Update profile — uses NEW endpoint under rider router
     document.getElementById('updateForm').addEventListener('submit', async (e) => {
       e.preventDefault();
 
@@ -204,7 +276,7 @@
       payload.append('name', document.getElementById('nameInput').value);
       payload.append('email', document.getElementById('emailInput').value);
 
-      const res = await fetch('/api/update-profile', {
+      const res = await fetch('/api/rider/update-profile', {  // ✅ updated path
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: payload
@@ -212,6 +284,26 @@
 
       const msg = document.getElementById('message');
       msg.textContent = res.ok ? '✅ Profile updated!' : '❌ Update failed.';
+      if (res.ok) {
+        // Reflect new values in the display area
+        document.getElementById('name').textContent = document.getElementById('nameInput').value || '—';
+        document.getElementById('email').textContent = document.getElementById('emailInput').value || '—';
+      }
+    });
+
+    // Copy referral link button
+    document.getElementById('copyRef').addEventListener('click', async () => {
+      const inp = document.getElementById('refLink');
+      const btn = document.getElementById('copyRef');
+      try {
+        await navigator.clipboard.writeText(inp.value);
+        const old = btn.textContent;
+        btn.textContent = '✅ Copied';
+        setTimeout(() => (btn.textContent = old), 1200);
+      } catch {
+        inp.select();
+        document.execCommand?.('copy');
+      }
     });
   </script>
 </body>
