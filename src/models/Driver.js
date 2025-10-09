@@ -32,11 +32,11 @@ const DriverStatsSchema = new mongoose.Schema({
 /* ---------------- banking subdoc ---------------- */
 const BankingSchema = new mongoose.Schema({
   accountHolder: { type: String, trim: true },
-  bankName:      { type: String, trim: true },              // e.g., FNB, ABSA, Standard Bank
-  accountType:   { type: String, trim: true },              // Cheque / Savings / Current
-  accountNumber: { type: String, trim: true },              // digits only
-  branchCode:    { type: String, trim: true },              // 6-digit universal (e.g., 632005)
-  swift:         { type: String, trim: true },              // optional (8 or 11 chars)
+  bankName:      { type: String, trim: true },
+  accountType:   { type: String, trim: true },
+  accountNumber: { type: String, trim: true },
+  branchCode:    { type: String, trim: true },
+  swift:         { type: String, trim: true },
   updatedAt:     { type: Date }
 }, { _id: false });
 
@@ -80,9 +80,9 @@ const DriverSchema = new mongoose.Schema({
     idDocument: String,
     vehicleRegistration: String,
     driversLicense: String,
-    insuranceCertificate: String, // kept in schema for backward-compat
+    insuranceCertificate: String, // kept for backward-compat
     pdpOrPsv: String,
-    dekraCertificate: String,     // kept in schema for backward-compat
+    dekraCertificate: String,     // kept for backward-compat
     policeClearance: String,
     licenseDisc: String
   },
