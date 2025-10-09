@@ -47,6 +47,8 @@ const transporter = nodemailer.createTransport({
   requireTLS: !SECURE, // for 587 STARTTLS
   auth: { user: SMTP.user, pass: SMTP.pass },
   tls: { minVersion: 'TLSv1.2', servername: SMTP.host },
+  logger: true,  // extra transport logs (useful during setup)
+  debug: true,   // verbose output
 });
 
 (async () => {
@@ -65,7 +67,6 @@ const transporter = nodemailer.createTransport({
 })();
 
 /* ------------------------------ base template ------------------------------ */
-/** Beautiful, client-safe HTML. Black text globally; buttons/blk override. */
 function wrapEmail({
   title = 'VayaRide',
   preheader = '',
