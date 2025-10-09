@@ -211,6 +211,9 @@ router.post('/register', ensureGuest, async (req, res) => {
       }
     }
 
+    // 🔎 explicit mail log before sending
+    console.log('[MAIL] about to send driver welcome & admin alert for', emailRaw);
+
     try {
       await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw });
     } catch (e) {
