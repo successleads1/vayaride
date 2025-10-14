@@ -1,0 +1,130 @@
+<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin • Dashboard</title>
+<style>
+:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;--accent:#fff;--ok:#00e676;--warn:#ffd166;--err:#ff4d4d}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+.layout{display:flex;min-height:100vh}
+aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand img{width:44px;height:44px;border-radius:50%;border:2px solid #fff}
+.brand h1{font-size:16px;margin:0}
+nav a{display:block;padding:10px;border-radius:8px;text-decoration:none;color:#fff;border:1px solid transparent}
+nav a:hover{background:#101010;border-color:#222}
+main{flex:1;padding:20px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+h2{margin:0 0 10px;font-size:18px}
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}
+.stat{background:#111;border:1px solid var(--border);border-radius:10px;padding:14px}
+.stat .num{font-size:22px;font-weight:800}
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+button.logout{background:#111;color:#fff;border:1px solid var(--border);padding:8px 10px;border-radius:8px;cursor:pointer}
+.feed{max-height:300px;overflow:auto;border:1px solid var(--border);background:#0a0a0a;border-radius:10px;padding:10px}
+.feed-item{padding:8px 6px;border-bottom:1px dashed #222}
+.feed-item:last-child{border-bottom:none}
+.feed .meta{color:#bbb;font-size:12px}
+.badge{padding:4px 8px;border-radius:999px;border:1px solid #333;background:#111}
+</style></head><body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="">
+      <h1>VayaRide Admin</h1>
+    </div>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/admin/drivers">Drivers</a>
+      <!-- ✅ Added Riders link -->
+      <a href="/admin/riders">Riders</a>
+      <a href="/admin/trips">Trips</a>
+      <a href="/admin/drivers?status=pending">Pending Drivers</a>
+      <a href="/admin/drivers?status=approved">Approved Drivers</a>
+      <a href="/admin/drivers?status=rejected">Rejected Drivers</a>
+    </nav>
+    <form action="/admin/logout" method="POST" style="margin-top:12px">
+      <button class="logout" type="submit">Logout</button>
+    </form>
+  </aside>
+  <main>
+    <section class="card">
+      <div class="topbar"><h2>Overview</h2><div style="color:#bbb">Hello, <%= admin.name %></div></div>
+      <div class="stats">
+        <div class="stat"><div class="num"><%= counts.totalDrivers %></div><div class="lbl">Drivers</div></div>
+        <div class="stat"><div class="num"><%= riderCount %></div><div class="lbl">Riders</div></div>
+        <div class="stat"><div class="num"><%= rideStats.total || 0 %></div><div class="lbl">Trips (total)</div></div>
+        <div class="stat"><div class="num"><%= (rideStats.accepted||0)+(rideStats.enroute||0) %></div><div class="lbl">Active</div></div>
+        <div class="stat"><div class="num"><%= rideStats.cancelled || 0 %></div><div class="lbl">Cancelled</div></div>
+        <div class="stat"><div class="num"><%= rideStats.completed || 0 %></div><div class="lbl">Completed</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Recent Trips</h2>
+      <table class="table">
+        <thead><tr><th>Trip</th><th>Status</th><th>Driver</th><th>Created</th><th>Action</th></tr></thead>
+        <tbody>
+          <% recentTrips.forEach(t => { %>
+            <tr>
+              <td>Trip <%= String(t._id).slice(-6).toUpperCase() %></td>
+              <td><span class="badge"><%= t.status %></span></td>
+              <td><%= t.driverId ? t.driverId : '-' %></td>
+              <td><%= new Date(t.createdAt).toLocaleString() %></td>
+              <td><a href="/admin/trips/<%= t._id %>">Open</a></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Recent Cancellations</h2>
+      <table class="table">
+        <thead><tr><th>Trip</th><th>Reason</th><th>Updated</th><th>Action</th></tr></thead>
+        <tbody>
+          <% recentCancels.forEach(t => { %>
+            <tr>
+              <td>Trip <%= String(t._id).slice(-6).toUpperCase() %></td>
+              <td><%= t.cancelReason || '-' %></td>
+              <td><%= new Date(t.updatedAt).toLocaleString() %></td>
+              <td><a href="/admin/trips/<%= t._id %>">Open</a></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Live Feed</h2>
+      <div id="feed" class="feed">
+        <% recentActivity.forEach(a => { %>
+          <div class="feed-item">
+            <div><b><%= a.type.toUpperCase() %></b> — <%= a.message || '' %></div>
+            <div class="meta">Trip <%= String(a.rideId).slice(-6).toUpperCase() %> • <%= new Date(a.createdAt).toLocaleTimeString() %></div>
+          </div>
+        <% }) %>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const feed = document.getElementById('feed');
+  const sock = io();
+
+  function push(item){
+    const div = document.createElement('div');
+    div.className = 'feed-item';
+    const trip = (item.rideId || '').slice(-6).toUpperCase();
+    const time = new Date(item.createdAt || Date.now()).toLocaleTimeString();
+    div.innerHTML = '<div><b>'+item.type.toUpperCase()+'</b> — '+(item.message||'')+'</div>'
+                  + '<div class="meta">Trip '+trip+' • '+time+'</div>';
+    feed.prepend(div);
+    while(feed.children.length > 200) feed.removeChild(feed.lastChild);
+  }
+
+  sock.on('admin:activity', push);
+</script>
+</body></html>

@@ -1,0 +1,114 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Driver Dashboard • VayaRide</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; background:#000; color:#fff; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { max-width:900px; margin:30px auto; padding:20px; }
+    .top { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px }
+    .pill { padding:8px 12px; border-radius:999px; background:#111; border:1px solid #222; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .card { background:#111; border:1px solid #222; border-radius:10px; padding:16px; }
+    label { display:block; margin-top:12px; font-weight:600 }
+    input { width:100%; padding:10px; border:none; border-radius:6px; background:#222; color:#fff; margin-top:6px; }
+    button { margin-top:12px; padding:12px; border:none; border-radius:6px; font-weight:700; background:#fff; color:#000; cursor:pointer }
+    button:hover { background:#ddd }
+    .docs { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .docfield { background:#0f0f0f; border:1px dashed #333; padding:12px; border-radius:8px }
+    a.logout { color:#fff; opacity:.9; text-decoration:none }
+    .muted { opacity:.85 }
+    .alert { margin:12px 0; padding:10px 12px; border-radius:6px; }
+    .alert-ok { background:#0d3; color:#000; font-weight:700 }
+    .alert-err { background:#d33; color:#fff; font-weight:700 }
+    @media (max-width: 800px) {
+      .grid { grid-template-columns:1fr; }
+      .docs { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h2 style="margin:0">Welcome, <%= driver.name || 'Driver' %></h2>
+        <div class="muted">Status: <%= statusText %> • Vehicle: <%= driver.vehicleType %></div>
+      </div>
+      <div class="pill"><a class="logout" href="/driver/logout">Logout</a></div>
+    </div>
+
+    <% if (uploaded) { %>
+      <div class="alert alert-ok">✅ Documents uploaded.</div>
+    <% } %>
+    <% if (uploadError) { %>
+      <div class="alert alert-err">❌ Upload failed. Please try again.</div>
+    <% } %>
+
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">Account</h3>
+        <div class="muted">Email: <%= driver.email %></div>
+        <div class="muted">Phone: <%= driver.phone || '—' %></div>
+        <div class="muted">Approved: <%= driver.isApproved ? 'Yes' : 'No' %></div>
+        <p class="muted" style="margin-top:12px">
+          <% if (!driver.isApproved) { %>
+            Your application is being processed. Please upload all required documents below.
+          <% } else { %>
+            You are approved. You can now use the Telegram driver bot.
+          <% } %>
+        </p>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">Upload Documents</h3>
+        <form method="post" action="/driver/upload-docs" enctype="multipart/form-data">
+          <div class="docs">
+            <div class="docfield">
+              <label>Driver Profile Photo</label>
+              <input type="file" name="profilePhoto" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>Vehicle Photo With Number Plate</label>
+              <input type="file" name="vehiclePhotoWithPlate" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>National Identity Document</label>
+              <input type="file" name="nationalId" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>Vehicle Registration / LogBook</label>
+              <input type="file" name="vehicleRegistration" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>Driver's License</label>
+              <input type="file" name="driversLicense" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>Vehicle Insurance Certificate</label>
+              <input type="file" name="insuranceCertificate" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>PDP / PSV Badge</label>
+              <input type="file" name="pdpOrPsvBadge" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>DEKRA Certificate</label>
+              <input type="file" name="dekraCertificate" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>Police Clearance Certificate</label>
+              <input type="file" name="policeClearance" accept="image/*" />
+            </div>
+            <div class="docfield">
+              <label>Vehicle License Disc</label>
+              <input type="file" name="vehicleLicenseDisc" accept="image/*" />
+            </div>
+          </div>
+          <button type="submit">Upload / Update Documents</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

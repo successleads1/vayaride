@@ -1,0 +1,315 @@
+<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin • Rider</title>
+<style>
+:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;--ok:#1f6feb;--warn:#f39c12}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+a{color:#fff}
+
+.layout{display:flex;min-height:100vh}
+aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand img{width:44px;height:44px;border-radius:50%;border:2px solid #fff}
+.brand h1{font-size:16px;margin:0}
+nav a{display:block;padding:10px;border-radius:8px;text-decoration:none;color:#fff;border:1px solid transparent}
+nav a:hover{background:#101010;border-color:#222}
+
+main{flex:1;padding:20px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+h2{margin:0 0 10px;font-size:18px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kv{display:grid;grid-template-columns:160px 1fr;gap:8px;color:#ddd}
+.k{color:#aaa}
+.badge{padding:4px 8px;border-radius:999px;border:1px solid #333;background:#111;font-size:12px}
+.table{width:100%;border-collapse:collapse;margin-top:6px}
+.table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left;vertical-align:top}
+.small{font-size:12px;color:#bbb}
+.coords{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#a9a9a9}
+a.link{color:#7aa2ff;text-decoration:none}
+a.link:hover{text-decoration:underline}
+
+.btn{background:#111;border:1px solid #333;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px;align-items:center}
+.btn.small{font-size:12px;padding:6px 8px}
+.btn.primary{background:#0b1433;border-color:#1b3ea4}
+</style>
+</head><body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="">
+      <h1>VayaRide Admin</h1>
+    </div>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/admin/drivers">Drivers</a>
+      <a href="/admin/riders">Riders</a>
+      <a href="/admin/trips">Trips</a>
+    </nav>
+    <form action="/admin/logout" method="POST" style="margin-top:12px">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+  </aside>
+
+  <main>
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div>
+          <h2>Rider • <%= rider.name || '—' %></h2>
+          <div class="small">ID: <%= rider._id %></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn primary" id="msg-open">Message Rider</button>
+          <button class="btn small" id="ref-ensure">Generate/Ensure Affiliate</button>
+          <button class="btn small" id="ref-copy">Copy Affiliate Link</button>
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top:12px">
+        <div>
+          <h3 class="small" style="text-transform:uppercase;letter-spacing:.08em;color:#bbb">Profile</h3>
+          <div class="kv">
+            <div class="k">Name</div><div><%= rider.name || '—' %></div>
+            <div class="k">Email</div><div><%= rider.email || '—' %></div>
+            <div class="k">Phone</div><div><%= rider.phone || rider.msisdn || '—' %></div>
+            <div class="k">Platform</div><div><span class="badge"><%= rider.platform || '—' %></span></div>
+            <div class="k">Telegram chatId</div><div><%= rider.chatId || '—' %></div>
+            <div class="k">WhatsApp JID</div><div><%= rider.waJid || '—' %></div>
+            <div class="k">Trips</div><div><%= Number(rider.trips||0) %></div>
+            <div class="k">Credit</div><div>R <%= Number(rider.credit||0).toFixed(2) %></div>
+            <div class="k">Joined</div><div><%= new Date(rider.createdAt).toLocaleString() %></div>
+            <div class="k">Last Seen</div><div><%= rider.lastSeenAt ? new Date(rider.lastSeenAt).toLocaleString() : '—' %></div>
+          </div>
+
+          <h3 class="small" style="margin-top:16px;text-transform:uppercase;letter-spacing:.08em;color:#bbb">Last Location</h3>
+          <% if (rider.lastLocation && typeof rider.lastLocation.lat === 'number' && typeof rider.lastLocation.lng === 'number') { 
+               const lat = Number(rider.lastLocation.lat).toFixed(6);
+               const lng = Number(rider.lastLocation.lng).toFixed(6);
+               const gmap = `https://maps.google.com/?q=${lat},${lng}`;
+          %>
+            <div class="kv">
+              <div class="k">Lat/Lng</div><div class="coords"><a class="link" href="<%= gmap %>" target="_blank"><%= lat %>,<%= lng %></a></div>
+              <div class="k">Timestamp</div><div><%= rider.lastLocation.ts ? new Date(rider.lastLocation.ts).toLocaleString() : '—' %></div>
+            </div>
+          <% } else { %>
+            <div class="small">—</div>
+          <% } %>
+        </div>
+
+        <div>
+          <h3 class="small" style="text-transform:uppercase;letter-spacing:.08em;color:#bbb">Referral</h3>
+          <% const rs = rider.referralStats || {}; %>
+          <div class="kv">
+            <div class="k">Code</div><div id="ref-code"><%= rider.referralCode || '—' %></div>
+            <div class="k">Link</div><div class="small" id="ref-link"><%= rider.referralCode ? (publicUrl + '/i/r/' + encodeURIComponent(rider.referralCode)) : '—' %></div>
+            <div class="k">Clicks</div><div><%= rs.clicks || 0 %></div>
+            <div class="k">Registrations</div><div><%= rs.registrations || 0 %></div>
+            <div class="k">Last Shared</div><div><%= rs.lastSharedAt ? new Date(rs.lastSharedAt).toLocaleString() : '—' %></div>
+          </div>
+
+          <h3 class="small" style="margin-top:16px;text-transform:uppercase;letter-spacing:.08em;color:#bbb">Discount</h3>
+          <% const active = (rider.nextDiscountPct||0)>0 && (!rider.nextDiscountExpiresAt || new Date()<new Date(rider.nextDiscountExpiresAt)); %>
+          <% if (active) { %>
+            <div class="kv">
+              <div class="k">Percent</div><div><%= Math.round((rider.nextDiscountPct||0)*100) %>%</div>
+              <div class="k">Expires</div><div><%= rider.nextDiscountExpiresAt ? new Date(rider.nextDiscountExpiresAt).toLocaleString() : 'no expiry' %></div>
+              <div class="k">Locked Ride</div><div><%= rider.nextDiscountLockedRide || '—' %></div>
+            </div>
+          <% } else { %>
+            <div class="small">—</div>
+          <% } %>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Recent Trips</h2>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Trip</th>
+            <th>Status</th>
+            <th>Payment</th>
+            <th>Driver</th>
+            <th>Pickup / Drop</th>
+            <th>Created</th>
+            <th>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+        <% recentTrips.forEach(t => {
+             const idShort = String(t._id).slice(-6).toUpperCase();
+             const pm = (t.paymentMethod || '').toLowerCase();
+             const pickup = t.pickup ? `${Number(t.pickup.lat).toFixed(5)},${Number(t.pickup.lng).toFixed(5)}` : null;
+             const drop   = t.destination ? `${Number(t.destination.lat).toFixed(5)},${Number(t.destination.lng).toFixed(5)}` : null;
+             const gmap = (latlng) => `https://maps.google.com/?q=${latlng}`;
+        %>
+          <tr>
+            <td>Trip <%= idShort %></td>
+            <td><span class="badge"><%= t.status %></span></td>
+            <td><span class="badge"><%= pm ? pm.toUpperCase() : '—' %></span></td>
+            <td><%= (t.driverId && (t.driverId.name || t.driverId.email)) || '-' %></td>
+            <td>
+              <% if (pickup) { %>
+                <div class="coords">Pickup: <a class="link" target="_blank" href="<%= gmap(pickup) %>"><%= pickup %></a></div>
+              <% } %>
+              <% if (drop) { %>
+                <div class="coords">Drop: <a class="link" target="_blank" href="<%= gmap(drop) %>"><%= drop %></a></div>
+              <% } %>
+            </td>
+            <td><%= new Date(t.createdAt).toLocaleString() %></td>
+            <td><a class="link" href="/admin/trips/<%= t._id %>">Open</a></td>
+          </tr>
+        <% }) %>
+        <% if (!recentTrips || recentTrips.length === 0) { %>
+          <tr><td colspan="7" class="small">No trips yet.</td></tr>
+        <% } %>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</div>
+
+<!-- Compose modal -->
+<div class="modal-backdrop" id="msg-bd" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:20px;z-index:999;background:rgba(0,0,0,.6);backdrop-filter:blur(2px);">
+  <div class="modal" style="width:min(680px,96vw);background:#0f0f0f;border:1px solid var(--border);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.5);padding:16px;transform:translateY(6px) scale(.98);opacity:0;transition:.18s ease;">
+    <script>/* style hook */</script>
+    <h3>Message Rider</h3>
+    <div class="row" style="margin:10px 0;color:#ddd">
+      <label class="small">Channel</label>
+      <select id="msg-channel" style="width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px">
+        <option value="wa">WhatsApp</option>
+        <option value="email">Email</option>
+      </select>
+    </div>
+    <div class="row" style="margin:10px 0;color:#ddd">
+      <label class="small">Quick templates</label>
+      <select id="msg-tpl" style="width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px">
+        <option value="">— choose a template (optional) —</option>
+        <option value="thanks">🙏 Thank you</option>
+        <option value="discount">💸 Discount available</option>
+        <option value="dashboard">🔐 Open your dashboard</option>
+      </select>
+    </div>
+    <div id="email-subject-row" class="row" style="display:none;margin:10px 0;color:#ddd">
+      <label class="small">Subject</label>
+      <input id="msg-subj" type="text" placeholder="Subject"
+        style="width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px">
+    </div>
+    <div class="row" style="margin:10px 0;color:#ddd">
+      <label class="small">Message</label>
+      <textarea id="msg-body" placeholder="Type your message…"
+        style="width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px;min-height:160px;resize:vertical"></textarea>
+      <div class="small" style="color:#aaa;margin-top:6px">For WhatsApp, this sends via your connected bot.</div>
+    </div>
+    <div class="actions" style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+      <button class="btn" id="msg-cancel">Cancel</button>
+      <button class="btn primary" id="msg-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const publicUrl = '<%= publicUrl || "" %>'.replace(/\/$/, '');
+  const riderId = '<%= rider._id %>';
+  const $ = (s, r=document)=>r.querySelector(s);
+
+  // modal open/close
+  const bd = $('#msg-bd');
+  const open = ()=> bd.style.display='flex';
+  const close = ()=> bd.style.display='none';
+  $('#msg-open')?.addEventListener('click', open);
+  $('#msg-cancel')?.addEventListener('click', close);
+  bd?.addEventListener('click', (e)=>{ if(e.target===bd) close(); });
+
+  const ch = $('#msg-channel');
+  const tpl = $('#msg-tpl');
+  const subj = $('#msg-subj');
+  const subjRow = $('#email-subject-row');
+  const body = $('#msg-body');
+
+  ch?.addEventListener('change', ()=> subjRow.style.display = (ch.value==='email' ? '' : 'none'));
+
+  function setTpl(v){
+    if (v==='thanks'){
+      subj.value = 'Thank you for using VayaRide';
+      body.value =
+`Hi <%= rider.name || 'there' %> 👋
+
+Thank you for using *VayaRide*! We appreciate you.
+Open your dashboard any time:
+${publicUrl}/rider-dashboard.html
+
+Safe travels!`;
+    } else if (v==='discount'){
+      subj.value = 'A discount is waiting for you 🎁';
+      body.value =
+`Good news!
+
+There’s a discount available on your next ride.
+Open your dashboard to see details:
+${publicUrl}/rider-dashboard.html`;
+    } else if (v==='dashboard'){
+      subj.value = 'Access your VayaRide dashboard';
+      body.value =
+`Quick access to your dashboard:
+${publicUrl}/rider-dashboard.html
+
+From there, you can track rides and manage your account.`;
+    }
+  }
+  tpl?.addEventListener('change', ()=> setTpl(tpl.value));
+
+  // send
+  $('#msg-send')?.addEventListener('click', async ()=>{
+    const channel = ch.value || 'wa';
+    const message = (body.value||'').trim();
+    if (!message) return alert('Type a message');
+
+    if (channel==='wa'){
+      // send to single rider using /riders/wa selected mode with single ID
+      const payload = { mode:'selected', message, selectedIds: riderId };
+      const r = await fetch('/admin/riders/wa', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      const data = await r.json();
+      if (!data.ok) return alert('Failed: '+(data.error||''));
+      alert(`WhatsApp sent to ${data.sent} rider(s).`);
+      close();
+    } else {
+      const subject = (subj.value||'').trim();
+      if (!subject) return alert('Subject required for email');
+      const payload = { mode:'selected', subject, message, selectedIds: riderId };
+      const r = await fetch('/admin/riders/email', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+      if (r.redirected) { location.href = r.url; return; }
+      alert('Email sent (or queued).');
+      close();
+    }
+  });
+
+  // referral tools
+  const refCodeEl = document.getElementById('ref-code');
+  const refLinkEl = document.getElementById('ref-link');
+
+  document.getElementById('ref-ensure')?.addEventListener('click', async ()=>{
+    try{
+      const r = await fetch('/admin/riders/'+riderId+'/referral/ensure', { method:'POST' });
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error||'Failed');
+      const code = data.code;
+      refCodeEl.textContent = code;
+      refLinkEl.textContent = publicUrl + '/i/r/' + encodeURIComponent(code);
+      alert('Affiliate code ensured: '+code);
+    }catch(e){ alert('Failed: '+(e?.message||e)); }
+  });
+
+  document.getElementById('ref-copy')?.addEventListener('click', async ()=>{
+    const link = refLinkEl.textContent || '';
+    if (!link || link==='—') return alert('Generate the code first.');
+    try{
+      await navigator.clipboard.writeText(link);
+      alert('Copied affiliate link!');
+      // mark shared
+      fetch('/admin/riders/'+riderId+'/referral/mark-shared', { method:'POST' }).catch(()=>{});
+    }catch{ alert('Could not copy, please copy manually.'); }
+  });
+</script>
+</body></html>

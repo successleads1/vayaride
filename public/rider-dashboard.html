@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Rider Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: #000; font-family: 'Segoe UI', sans-serif; color: #fff;
+      overflow: hidden;
+    }
+    .container { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 20px; height: 100%; overflow: hidden; }
+    .logo { width: 100px; height: 100px; border-radius: 50%; border: 3px solid #fff; object-fit: cover; margin-bottom: 10px; }
+    .card { width: 100%; max-width: 600px; background: #1a1a1a; padding: 20px; border-radius: 10px; box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); overflow-y: auto; max-height: calc(100vh - 170px); }
+    h2, h3 { text-align: center; }
+    p, label { margin: 10px 0 5px; }
+    input, button { width: 100%; padding: 12px; border: none; border-radius: 5px; margin-bottom: 15px; font-size: 16px; }
+    input { background: #333; color: #fff; }
+    button { background: #fff; color: #000; font-weight: bold; cursor: pointer; transition: background 0.2s ease; }
+    button:hover { background: #ddd; }
+    .back-btn {
+      margin-top: auto; background: transparent; color: #aaa; border: 2px solid #444; text-decoration: none; padding: 10px 20px;
+      border-radius: 5px; display: inline-block; text-align: center; transition: all 0.2s ease;
+    }
+    .back-btn:hover { color: #fff; border-color: #fff; }
+    #pinModal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.95); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    #pinModal form { background: #1a1a1a; padding: 30px; border-radius: 10px; text-align: center; box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); max-width: 300px; width: 100%; }
+    #pinModal input { font-size: 24px; text-align: center; letter-spacing: 8px; margin-bottom: 10px; }
+    #pinMsg { color: #ff4d4d; font-size: 14px; min-height: 18px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat { background:#111; border:1px solid #2a2a2a; border-radius:8px; padding:12px; text-align:center; }
+    .stat .label { color:#aaa; font-size:12px; }
+    .stat .value { font-size:18px; font-weight:600; margin-top:4px; }
+    .muted { color:#aaa; font-size: 14px; }
+    .stars { font-size: 18px; letter-spacing: 2px; }
+    .stars .dim { opacity: 0.25; }
+    @media (max-width: 480px) {
+      input, button { font-size: 15px; padding: 10px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" class="logo" alt="Logo">
+
+    <div class="card">
+      <h2>👤 Rider Profile</h2>
+
+      <div class="grid">
+        <div class="stat">
+          <div class="label">Trips Completed</div>
+          <div id="trips" class="value">0</div>
+        </div>
+
+        <div class="stat">
+          <div class="label">Last Payment</div>
+          <div class="value">
+            <span id="lastPaymentAmount">—</span>
+          </div>
+          <div class="muted" id="lastPaymentMeta">—</div>
+        </div>
+
+        <!-- ⭐ Rider Rating (driver → rider) -->
+        <div class="stat" style="grid-column: 1 / -1;">
+          <div class="label">Rider Rating</div>
+          <div id="ratingStars" class="stars">★★★★★</div>
+          <div id="ratingMeta" class="muted">—</div>
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <p><b>Name:</b> <span id="name">Loading...</span></p>
+        <p><b>Email:</b> <span id="email">Loading...</span></p>
+      </div>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid #333;">
+
+      <h3>✏️ Edit Details</h3>
+      <form id="updateForm">
+        <label for="nameInput">Name</label>
+        <input type="text" id="nameInput" required>
+
+        <label for="emailInput">Email</label>
+        <input type="email" id="emailInput" required>
+
+        <input type="hidden" id="chatIdInput">
+        <button type="submit">💾 Save</button>
+      </form>
+
+      <p id="message" style="text-align:center;"></p>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid #333;">
+
+      <!-- 🎁 Refer & Save block -->
+      <h3>🎁 Refer & Save (20% off)</h3>
+      <p class="muted">Share your link. When a friend signs up, you get <b>20% off</b> your next trip.</p>
+
+      <div id="referralBlock" style="background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="refLink" type="text" readonly value="Loading..." style="flex:1;min-width:220px">
+          <button id="copyRef" type="button">📋 Copy</button>
+          <a id="openQR" href="/qr.png" target="_blank" rel="noopener" class="back-btn" style="margin:0">Show QR</a>
+        </div>
+        <div class="grid" style="margin-top:10px">
+          <div class="stat">
+            <div class="label">Clicks</div>
+            <div id="refClicks" class="value">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Registrations</div>
+            <div id="refRegs" class="value">0</div>
+          </div>
+        </div>
+        <div id="discountRow" class="muted" style="margin-top:10px">No discount yet.</div>
+      </div>
+
+    </div>
+
+    <a href="https://t.me/vayarider_bot" class="back-btn">⬅️ Back to Telegram</a>
+  </div>
+
+  <!-- PIN Modal -->
+  <div id="pinModal">
+    <form onsubmit="submitPIN(event)">
+      <h2>🔐 Enter 4-digit PIN</h2>
+      <input type="password" id="pinInput" maxlength="4" placeholder="****" required />
+      <button type="submit">Unlock</button>
+      <p id="pinMsg"></p>
+    </form>
+  </div>
+
+  <script>
+    const token = new URLSearchParams(window.location.search).get('token');
+
+    // If user opened the page without a token, show a helpful message.
+    if (!token) {
+      document.getElementById('pinModal').style.display = 'flex';
+      const pinMsg = document.getElementById('pinMsg');
+      pinMsg.textContent = 'No token provided. Please open this page from your secure dashboard link.';
+    }
+
+    function fmtMethod(m) {
+      if (!m) return '—';
+      return (m === 'payfast') ? 'Card (PayFast)' : (m === 'cash' ? 'Cash' : m);
+    }
+    function fmtDate(d) {
+      if (!d) return '';
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return '';
+      return dt.toLocaleString();
+    }
+    function renderStars(avg) {
+      const rounded = Math.round(Number(avg || 0));
+      const filled = '★'.repeat(Math.min(5, Math.max(0, rounded)));
+      const empty = '★'.repeat(5 - Math.min(5, Math.max(0, rounded)));
+      return `<span>${filled}</span><span class="dim">${empty}</span>`;
+    }
+
+    async function submitPIN(e) {
+      e.preventDefault();
+
+      const pinInput = document.getElementById('pinInput');
+      const pinMsg = document.getElementById('pinMsg');
+      const PIN = (pinInput.value || '').trim();
+
+      pinMsg.textContent = '';
+
+      if (PIN.length !== 4) {
+        pinMsg.textContent = "❌ PIN must be 4 digits.";
+        return;
+      }
+
+      const url = `/api/rider-by-token/${encodeURIComponent(token)}?pin=${encodeURIComponent(PIN)}`;
+      try {
+        const res = await fetch(url);
+        const text = await res.text();
+
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error('Non-JSON response from server'); }
+
+        if (!res.ok) throw new Error(data?.error || 'Access denied or expired.');
+
+        document.getElementById('pinModal').style.display = 'none';
+
+        // Base profile
+        document.getElementById('chatIdInput').value = data.chatId ?? '';
+        document.getElementById('name').textContent = data.name || '—';
+        document.getElementById('email').textContent = data.email || '—';
+        document.getElementById('trips').textContent = data.trips || 0;
+
+        // Prefill form
+        document.getElementById('nameInput').value = data.name || '';
+        document.getElementById('emailInput').value = data.email || '';
+
+        // Last payment
+        const amtNode = document.getElementById('lastPaymentAmount');
+        const metaNode = document.getElementById('lastPaymentMeta');
+        if (data.lastPayment && typeof data.lastPayment.amount === 'number') {
+          amtNode.textContent = 'R' + data.lastPayment.amount.toFixed(0);
+          const when = fmtDate(data.lastPayment.at);
+          metaNode.textContent = `${fmtMethod(data.lastPayment.method)}${when ? ' · ' + when : ''}`;
+        } else {
+          amtNode.textContent = '—';
+          metaNode.textContent = 'No payments yet';
+        }
+
+        // ⭐ Rider rating (driver → rider)
+        const ratingStarsEl = document.getElementById('ratingStars');
+        const ratingMetaEl = document.getElementById('ratingMeta');
+        const avg = data?.riderStars?.avg ?? null;
+        const count = data?.riderStars?.count ?? 0;
+
+        if (avg && count > 0) {
+          ratingStarsEl.innerHTML = renderStars(avg);
+          ratingMetaEl.textContent = `${avg.toFixed(1)} / 5.0 · ${count} rating${count === 1 ? '' : 's'}`;
+        } else {
+          ratingStarsEl.innerHTML = '<span class="dim">★★★★★</span>';
+          ratingMetaEl.textContent = 'No ratings yet';
+        }
+
+        /* 🔗 Load referral + discount info for this chatId */
+        const chatId = data.chatId ?? null;
+        if (chatId != null) {
+          const res2 = await fetch(`/api/rider/${encodeURIComponent(chatId)}`);
+          const info = await res2.json();
+
+          // share link + stats
+          const refLink = document.getElementById('refLink');
+          const refClicks = document.getElementById('refClicks');
+          const refRegs = document.getElementById('refRegs');
+          const openQR = document.getElementById('openQR');
+
+          if (info?.referral?.link) {
+            refLink.value = info.referral.link;
+            // QR for same-domain path only
+            try {
+              const u = new URL(info.referral.link);
+              openQR.href = `/qr.png?u=${encodeURIComponent(u.pathname)}`;
+            } catch {
+              openQR.href = '/qr.png';
+            }
+          } else {
+            refLink.value = '—';
+          }
+          refClicks.textContent = info?.referral?.clicks || 0;
+          refRegs.textContent = info?.referral?.registrations || 0;
+
+          // discount line
+          const drow = document.getElementById('discountRow');
+          const pct = Number(info?.discount?.pct || 0);
+          if (pct > 0) {
+            const exp = info?.discount?.expiresAt ? new Date(info.discount.expiresAt) : null;
+            const when = exp && !isNaN(exp.getTime()) ? ` (expires ${exp.toLocaleDateString()})` : '';
+            drow.innerHTML = `✅ <b>${Math.round(pct*100)}% off</b> will be applied to your next trip${when}.`;
+          } else {
+            drow.textContent = 'No discount yet. Share your link to earn 20% off your next trip!';
+          }
+        }
+
+      } catch (err) {
+        console.error('🔐 PIN verify error:', err);
+        document.getElementById('pinMsg').textContent = err.message || "❌ Access denied or expired.";
+      }
+    }
+
+    // Update profile — uses NEW endpoint under rider router
+    document.getElementById('updateForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const payload = new URLSearchParams();
+      payload.append('chatId', document.getElementById('chatIdInput').value);
+      payload.append('name', document.getElementById('nameInput').value);
+      payload.append('email', document.getElementById('emailInput').value);
+
+      const res = await fetch('/api/rider/update-profile', {  // ✅ updated path
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: payload
+      });
+
+      const msg = document.getElementById('message');
+      msg.textContent = res.ok ? '✅ Profile updated!' : '❌ Update failed.';
+      if (res.ok) {
+        // Reflect new values in the display area
+        document.getElementById('name').textContent = document.getElementById('nameInput').value || '—';
+        document.getElementById('email').textContent = document.getElementById('emailInput').value || '—';
+      }
+    });
+
+    // Copy referral link button
+    document.getElementById('copyRef').addEventListener('click', async () => {
+      const inp = document.getElementById('refLink');
+      const btn = document.getElementById('copyRef');
+      try {
+        await navigator.clipboard.writeText(inp.value);
+        const old = btn.textContent;
+        btn.textContent = '✅ Copied';
+        setTimeout(() => (btn.textContent = old), 1200);
+      } catch {
+        inp.select();
+        document.execCommand?.('copy');
+      }
+    });
+  </script>
+</body>
+</html>

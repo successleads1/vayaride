@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Driver Login • VayaRide</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; background:#000; color:#fff; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { max-width:460px; margin:40px auto; padding:20px; background:#111; border-radius:10px; box-shadow:0 0 20px rgba(255,255,255,.06); }
+    h1 { text-align:center }
+    label { display:block; margin-top:14px; font-weight:600 }
+    input { width:100%; padding:12px; border:none; border-radius:6px; background:#222; color:#fff; margin-top:6px; }
+    button { width:100%; margin-top:16px; padding:12px; border:none; border-radius:6px; font-weight:700; background:#fff; color:#000; cursor:pointer }
+    button:hover { background:#ddd }
+    .note { text-align:center; opacity:.85; margin-bottom:10px }
+    .topback { display:block; text-align:center; margin:20px auto 0; color:#fff; opacity:.8; text-decoration:none }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Driver Login</h1>
+    <% if (registered) { %><div class="note">✅ Registered. Please log in.</div><% } %>
+    <% if (typeof window !== 'undefined' && window.location.search.includes('error=1')) { %><% } %>
+
+    <form method="post" action="/driver/login">
+      <label>Email</label>
+      <input name="email" type="email" required />
+
+      <label>Password</label>
+      <input name="password" type="password" required />
+
+      <button type="submit">Log In</button>
+    </form>
+
+    <a class="topback" href="/driver/register">Create an account</a>
+    <a class="topback" href="/">← Back to Home</a>
+  </div>
+</body>
+</html>

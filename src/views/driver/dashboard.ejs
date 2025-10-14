@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>VayaRide • Driver Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <style>
+    :root {
+      --bg:#000; --card:#0f0f0f; --text:#fff; --muted:#bbb; --accent:#fff; --border:#222;
+      --ok:#00e676; --warn:#ffd166; --err:#ff4d4d;
+      --radius:12px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      background:radial-gradient(1200px 600px at 10% -10%, rgba(0,255,140,.05), transparent 60%) , var(--bg);
+      color:var(--text);
+      font-family:system-ui, Segoe UI, Arial, sans-serif;
+      -webkit-text-size-adjust:100%;
+    }
+
+    /* Header */
+    header{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:12px 16px;border-bottom:1px solid var(--border);
+      position:sticky;top:0;background:#000;z-index:2;
+      gap:12px;
+    }
+    .brand{display:flex;align-items:center;gap:10px;min-width:0}
+    .brand img{
+      width:44px;height:44px;border-radius:50%;border:2px solid #fff;object-fit:cover;flex:0 0 auto
+    }
+    .brand h1{
+      font-size:clamp(14px,2.5vw,18px);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+    }
+    .actions{
+      display:flex;flex-wrap:wrap;align-items:center;gap:8px;justify-content:flex-end
+    }
+    .actions a, .actions form button{
+      appearance:none;background:#111;border:1px solid var(--border);color:#fff;
+      padding:8px 12px;border-radius:8px;text-decoration:none;cursor:pointer;line-height:1.2
+    }
+    .actions a:hover, .actions form button:hover{filter:brightness(1.15)}
+    .pill{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222;white-space:nowrap}
+
+    /* Layout */
+    main{max-width:1100px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr;gap:16px}
+    @media(min-width:960px){ main{grid-template-columns:1fr 1fr} }
+
+    .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+    h2{margin:0 0 12px;font-size:clamp(16px,2.5vw,18px);display:flex;align-items:center;gap:10px}
+    .muted{color:var(--muted)}
+    .note{font-size:12px;color:#aaa;margin-top:6px}
+
+    /* Simple info grid */
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    @media(max-width:640px){ .grid{grid-template-columns:1fr} }
+    .grid .item{background:#111;border:1px solid var(--border);border-radius:8px;padding:12px}
+
+    .status{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:#111}
+    .dot{width:8px;height:8px;border-radius:50%}
+    .dot.pending{background:var(--warn)}
+    .dot.approved{background:var(--ok)}
+
+    label{font-size:14px;margin:10px 0 6px;display:block}
+    input,select{
+      width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);
+      background:#1a1a1a;color:#fff;font-size:16px;
+    }
+    input[type=file]{padding:10px;background:#111}
+    .hint{font-size:12px;color:#aaa;margin-top:4px}
+    .size-tag{font-size:12px;color:#bbb;margin-left:6px}
+
+    button.primary{
+      margin-top:12px;width:100%;padding:14px;border-radius:10px;border:1px solid var(--accent);
+      background:var(--accent);color:#000;font-weight:800;cursor:pointer;font-size:16px
+    }
+    button.primary:hover{filter:brightness(0.9)}
+    .btn, .btn-danger, .btn-ghost, .btn-light{
+      appearance:none;border-radius:8px;border:1px solid var(--border);background:#111;color:#fff;padding:8px 12px;cursor:pointer
+    }
+    .btn:hover{filter:brightness(1.15)}
+    .btn-danger{border-color:#532;background:#1a0000}
+    .btn-danger:hover{filter:brightness(1.15);background:#220000}
+    .btn-ghost{background:transparent;border-color:#444}
+    .btn-light{background:#fff;border-color:#fff;color:#000;font-weight:800}
+    .icon{font-style:normal;margin-right:6px}
+
+    .banner{border:1px solid var(--border);padding:12px 14px;border-radius:10px;margin:10px 0;background:#0b0b0b}
+    .banner.ok{border-color:#124;border-left:4px solid var(--ok)}
+    .banner.err{border-color:#412;border-left:4px solid var(--err)}
+
+    /* ---------- Docs table: desktop ---------- */
+    table.docs{width:100%;border-collapse:collapse;margin-top:8px}
+    table.docs th, table.docs td{border-bottom:1px dashed #222;padding:10px;vertical-align:middle;font-size:14px}
+    table.docs th{color:#ddd;text-align:left;font-weight:600}
+    .thumb{width:64px;height:64px;border:1px solid #222;border-radius:8px;object-fit:cover;background:#111}
+    .empty{color:#999}
+    .doc-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+    /* ---------- Docs table: mobile -> cards ---------- */
+    @media (max-width: 700px){
+      table.docs thead{display:none}
+      table.docs, table.docs tbody, table.docs tr, table.docs td{display:block;width:100%}
+      table.docs tr{
+        border:1px solid #222;border-radius:10px;padding:10px;margin-bottom:12px;background:#0d0d0d
+      }
+      table.docs td{
+        display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:none;padding:8px 4px
+      }
+      table.docs td::before{
+        content:attr(data-col);
+        flex:0 0 auto;color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:.02em
+      }
+      table.docs td[data-col="Preview"]{justify-content:flex-start}
+      .thumb{width:56px;height:56px}
+      .doc-actions{width:100%;justify-content:flex-end;gap:8px}
+    }
+
+    /* Header responsiveness */
+    @media (max-width: 700px){
+      header{flex-wrap:wrap;padding:10px 12px}
+      .actions{width:100%;justify-content:flex-start}
+      .actions form{display:inline}
+    }
+
+    img, video{max-width:100%;height:auto}
+    a, button, input, select{outline-color:var(--accent)}
+
+    @supports (padding:max(0px)){
+      header{padding-left:max(12px, env(safe-area-inset-left)); padding-right:max(12px, env(safe-area-inset-right));}
+      main{padding-left:max(16px, env(safe-area-inset-left)); padding-right:max(16px, env(safe-area-inset-right));}
+    }
+
+    /* ===== Invite & Earn pulse ===== */
+    .h2-badge{
+      display:inline-flex;align-items:center;gap:8px;
+      background:rgba(0,255,128,.08);
+      border:1px solid rgba(0,255,128,.35);
+      color:#baffd6;padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700
+    }
+    .pulse-dot{width:12px;height:12px;border-radius:50%;background:var(--ok);position:relative}
+    .pulse-dot::after{
+      content:"";position:absolute;inset:-8px;border-radius:50%;
+      box-shadow:0 0 0 0 rgba(0,255,128,.55);
+      animation:pulse 1.8s infinite ease-out;
+    }
+    @keyframes pulse{
+      0%{box-shadow:0 0 0 0 rgba(0,255,128,.55)}
+      70%{box-shadow:0 0 0 14px rgba(0,255,128,0)}
+      100%{box-shadow:0 0 0 0 rgba(0,255,128,0)}
+    }
+    .earn-card{
+      position:relative;overflow:hidden;
+      background:linear-gradient(180deg, rgba(0,255,140,.06), transparent 55%), var(--card);
+    }
+    .stat .num{font-size:22px;font-weight:900}
+    .shine{
+      position:absolute;top:0;left:-150%;width:50%;height:100%;
+      background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.06) 50%, transparent 100%);
+      transform:skewX(-20deg);animation:shineMove 6s infinite;
+    }
+    @keyframes shineMove{
+      0%{left:-150%}
+      60%{left:140%}
+      100%{left:140%}
+    }
+
+    /* ===== Modal (missing docs) ===== */
+    .modal{
+      position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+      background:rgba(0,0,0,.64); z-index:10000; padding:20px;
+    }
+    .modal[open]{ display:flex }
+    .modal .dialog{
+      width:min(560px,96vw); background:var(--card); color:#fff; border:1px solid var(--border);
+      border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,.55);
+      transform:translateY(6px) scale(.98); opacity:0; transition:.18s ease;
+    }
+    .modal[open] .dialog{ transform:translateY(0) scale(1); opacity:1; }
+    .dialog .hd{ display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border) }
+    .dialog h3{ margin:0; font-size:18px }
+    .dialog .bd{ padding:14px 16px; font-size:15px; color:#e9e9e9 }
+    .dialog .ft{ display:flex; gap:10px; justify-content:flex-end; padding:14px 16px; border-top:1px solid var(--border) }
+    .x{ background:#111; color:#fff; border:1px solid #333; width:34px; height:34px; border-radius:10px; cursor:pointer; font-size:18px; line-height:0 }
+    .btn-light{ background:#fff; color:#000; border:1px solid #fff; border-radius:10px; padding:10px 14px; font-weight:800; cursor:pointer }
+    .btn-ghost{ background:transparent; color:#fff; border:1px solid #444; border-radius:10px; padding:10px 14px; cursor:pointer }
+    .miss-list{margin:10px 0 0; padding-left:20px;}
+    .miss-list li{margin:4px 0}
+
+    /* ===== Invite card layout ===== */
+    .invite-grid{display:grid;grid-template-columns:1fr 220px;gap:14px;align-items:start}
+    @media (max-width: 900px){ .invite-grid{grid-template-columns:1fr} }
+    .share-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .share-row button{border:1px solid var(--border);background:#111;color:#fff;border-radius:8px;padding:10px 12px;cursor:pointer}
+    .share-row button:hover{filter:brightness(1.1)}
+    .code-box{display:flex;align-items:center;gap:8px}
+    .code-badge{display:inline-block;border:1px dashed #444;border-radius:10px;padding:6px 10px;letter-spacing:.08em;font-weight:800}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace}
+    .qr{width:100%;max-width:200px;height:auto;background:#fff;border-radius:12px;padding:8px;border:1px solid #333}
+    .stat{display:flex;align-items:center;gap:8px}
+    .stat .lbl{color:#bbb}
+    input.linkField{width:100%;padding:12px;border-radius:10px;border:1px dashed #444;background:#0f0f0f;color:#fff;font-family:inherit}
+  </style>
+</head>
+
+<%
+  const docs = (user && user.documents) || {};
+  // Hidden: 'insuranceCertificate' and 'dekraCertificate'
+  const requiredKeys = [
+    'driverProfilePhoto','vehiclePhoto','idDocument','vehicleRegistration',
+    'driversLicense','pdpOrPsv',
+    'policeClearance','licenseDisc'
+  ];
+  const labelMap = {
+    driverProfilePhoto:'Driver Profile Photo',
+    vehiclePhoto:'Vehicle Photo',
+    idDocument:'National ID',
+    vehicleRegistration:'Vehicle Registration',
+    driversLicense:'Driver’s License',
+    // insuranceCertificate:'Insurance Certificate',
+    pdpOrPsv:'PDP / PSV',
+    // dekraCertificate:'DEKRA Certificate',
+    policeClearance:'Police Clearance',
+    licenseDisc:'License Disc'
+  };
+  const missing = requiredKeys.filter(k => !docs[k]);
+  const firstMissing = missing[0] || '';
+
+  // Referral
+  const refCode = (user && user.referralCode) || '';
+  const rStats = (user && user.referralStats) || {};
+  const clicks = Number(rStats.clicks || 0);
+  const regs   = Number(rStats.registrations || 0);
+  const lastSharedAt = rStats.lastSharedAt ? new Date(rStats.lastSharedAt) : null;
+
+  // Banking
+  const banking = (user && user.banking) || {};
+  const bankComplete =
+    !!(banking.accountHolder && banking.bankName && banking.accountType &&
+       banking.accountNumber && banking.branchCode);
+%>
+
+<body data-missing="<%= missing.length %>">
+  <header>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide" />
+      <h1>VayaRide • Driver Dashboard</h1>
+    </div>
+    <div class="actions">
+      <span class="pill">Hello, <%= (user && user.name) || 'Driver' %></span>
+      <a href="/driver/upload-docs">Upload Docs</a>
+      <form action="/driver/logout" method="POST" style="display:inline;">
+        <button type="submit">Logout</button>
+      </form>
+    </div>
+  </header>
+
+  <main>
+    <!-- Banners -->
+    <% if (typeof ok !== 'undefined' && ok) { %>
+      <section class="banner ok"><strong>✅ Success:</strong> <%= ok %></section>
+    <% } %>
+    <% if (typeof err !== 'undefined' && err) { %>
+      <section class="banner err"><strong>❌ Error:</strong> <%= err %></section>
+    <% } %>
+
+    <!-- ⭐ Invite & Earn (Top, with pulse) -->
+    <section class="card earn-card" style="grid-column: 1 / -1;">
+      <div class="shine" aria-hidden="true"></div>
+      <h2>
+        <span class="h2-badge"><span class="pulse-dot"></span> Invite &amp; Earn</span>
+      </h2>
+
+      <% if (!refCode) { %>
+        <p class="note">Your referral link will appear here. If it’s missing, please refresh or contact support.</p>
+      <% } %>
+
+      <div class="invite-grid">
+        <div>
+          <div class="code-box">
+            <span class="muted">Your code</span>
+            <span class="code-badge mono" id="refCode"><%= refCode || '— — — — — —' %></span>
+          </div>
+
+          <label style="margin-top:12px">Your invite link</label>
+          <input id="refLink" class="linkField mono" type="text" readonly value="" placeholder="https://…/i/d/CODE" />
+
+          <div class="share-row">
+            <button id="copyBtn" class="btn"><span class="icon">📋</span>Copy</button>
+            <button id="shareBtn" class="btn"><span class="icon">📤</span>Share</button>
+            <button id="openBtn" class="btn"><span class="icon">🔗</span>Open</button>
+            <span class="note" id="shareNote" style="margin-left:auto"></span>
+          </div>
+
+          <div class="share-row" style="margin-top:12px">
+            <div class="stat">
+              <span class="num"><%= clicks %></span>
+              <span class="lbl">link opens</span>
+            </div>
+            <div class="stat" style="margin-left:18px">
+              <span class="num"><%= regs %></span>
+              <span class="lbl">registrations</span>
+            </div>
+          </div>
+
+          <% if (lastSharedAt) { %>
+            <p class="note" id="lastShared">Last shared: <%= lastSharedAt.toLocaleString() %></p>
+          <% } %>
+        </div>
+
+        <div>
+          <img id="qrImg" class="qr" alt="Referral QR" src="" />
+          <p class="note" style="text-align:center;margin-top:6px">Scan to register as a driver</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Profile -->
+    <section class="card">
+      <h2>Your Profile</h2>
+      <div class="grid">
+        <div class="item">
+          <div class="muted">Name</div>
+          <div><%= (user && user.name) || '—' %></div>
+        </div>
+        <div class="item">
+          <div class="muted">Email</div>
+          <div><%= (user && user.email) || '—' %></div>
+        </div>
+        <div class="item">
+          <div class="muted">Vehicle Type</div>
+          <div><%= (user && user.vehicleType) || 'Not set' %></div>
+        </div>
+        <div class="item">
+          <div class="muted">Application Status</div>
+          <span class="status">
+            <span class="dot <%= (user && user.status)==='approved' ? 'approved' : 'pending' %>"></span>
+            <%= (user && user.status) || 'pending' %>
+          </span>
+        </div>
+      </div>
+
+      <% if (user && user.status === 'approved' && user.botPin) { %>
+        <div class="banner ok" style="margin-top:10px;border-left:4px solid #0f0;">
+          <strong>Telegram PIN:</strong>
+          <span style="font-size:18px;font-weight:800;letter-spacing:2px">****<%= user.botPin.slice(-2) %></span>
+          <div class="note">Use this PIN to log in to the VayaRide Driver Telegram bot.</div>
+        </div>
+      <% } %>
+
+      <p class="note">If your status is <b>pending</b>, our team is reviewing your documents. You’ll be able to use the driver bot after approval.</p>
+    </section>
+
+    <!-- Banking -->
+    <section class="card">
+      <h2>Banking Details</h2>
+      <p class="note">Add your payout details below. Your info is stored securely and used only for payments.</p>
+
+      <% if (bankComplete) { %>
+        <div class="banner ok" style="margin-bottom:10px">
+          ✅ Banking details are on file. Update below if anything changes.
+        </div>
+      <% } %>
+
+      <form action="/driver/banking" method="POST" novalidate>
+        <label>Account Holder</label>
+        <input name="accountHolder" required placeholder="Account holder name"
+               value="<%= banking.accountHolder || '' %>"/>
+
+        <label>Bank Name</label>
+        <select name="bankName" required>
+          <option value="">Select bank</option>
+          <% const banks = ['FNB','ABSA','Standard Bank','Nedbank','Capitec','TymeBank','African Bank','Discovery Bank','Other']; %>
+          <% banks.forEach(b => { %>
+            <option value="<%= b %>" <%= (banking.bankName===b ? 'selected' : '') %>><%= b %></option>
+          <% }) %>
+        </select>
+
+        <label>Account Type</label>
+        <select name="accountType" required>
+          <% const types = ['Cheque / Current','Savings']; %>
+          <option value="">Select type</option>
+          <% types.forEach(t => { %>
+            <option value="<%= t %>" <%= (banking.accountType===t ? 'selected' : '') %>><%= t %></option>
+          <% }) %>
+        </select>
+
+        <label>Account Number</label>
+        <input name="accountNumber" required inputmode="numeric" pattern="^\d{6,17}$"
+               title="6–17 digits" placeholder="e.g. 6204567890"
+               value="<%= banking.accountNumber || '' %>"/>
+
+        <label>Branch / Universal Code</label>
+        <input name="branchCode" required inputmode="numeric" pattern="^\d{6}$"
+               title="6 digits (e.g., 632005 for ABSA)" placeholder="e.g. 632005"
+               value="<%= banking.branchCode || '' %>"/>
+        <div class="hint">For most SA banks, the universal branch code works (e.g., 632005 for ABSA).</div>
+
+        <label>SWIFT/BIC (optional)</label>
+        <input name="swift" pattern="^[A-Za-z0-9]{8}([A-Za-z0-9]{3})?$"
+               title="8 or 11 letters/numbers"
+               placeholder="e.g. FIRNZAJJ"
+               value="<%= banking.swift || '' %>"/>
+
+        <button type="submit" class="primary">Save Banking Details</button>
+        <p class="note">Thank you for submitting your banking details. We’ll notify you if we need additional verification for payouts.</p>
+      </form>
+    </section>
+
+    <!-- Documents on file -->
+    <section class="card" id="docs" style="grid-column: 1 / -1;">
+      <h2>Documents on File</h2>
+      <% const tableDocs = docs; %>
+      <table class="docs">
+        <thead>
+          <tr>
+            <th style="width:80px">Preview</th>
+            <th>Document</th>
+            <th>Status</th>
+            <th style="width:220px">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% const rows = [
+            ['driverProfilePhoto','Driver Profile Photo'],
+            ['vehiclePhoto','Vehicle Photo'],
+            ['idDocument','National ID'],
+            ['vehicleRegistration','Vehicle Registration'],
+            ['driversLicense','Driver’s License'],
+            // ['insuranceCertificate','Insurance Certificate'],  // hidden
+            ['pdpOrPsv','PDP / PSV'],
+            // ['dekraCertificate','DEKRA Certificate'],         // hidden
+            ['policeClearance','Police Clearance'],
+            ['licenseDisc','License Disc'],
+          ]; %>
+
+          <% rows.forEach(([key,label]) => {
+               const url = tableDocs[key];
+               const isImg = url && /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(url);
+               const isPdf = url && /\.pdf(\?|$)/i.test(url);
+          %>
+            <tr>
+              <td data-col="Preview">
+                <% if (url && isImg) { %>
+                  <img class="thumb" src="<%= url %>" alt="<%= label %>" />
+                <% } else if (url && isPdf) { %>
+                  <div class="thumb" style="display:flex;align-items:center;justify-content:center;">PDF</div>
+                <% } else if (url) { %>
+                  <div class="thumb" style="display:flex;align-items:center;justify-content:center;">FILE</div>
+                <% } else { %>
+                  <div class="thumb" style="display:flex;align-items:center;justify-content:center;opacity:.5">—</div>
+                <% } %>
+              </td>
+              <td data-col="Document"><%= label %></td>
+              <td data-col="Status">
+                <% if (url) { %>
+                  <span class="pill" style="border-color:#1f3;border-left:4px solid var(--ok)">Uploaded</span>
+                <% } else { %>
+                  <span class="pill empty">Not uploaded</span>
+                <% } %>
+              </td>
+              <td data-col="Action" class="doc-actions">
+                <% if (url) { %>
+                  <a class="btn" href="<%= url %>" target="_blank" rel="noopener">View</a>
+                  <form action="/driver/delete-doc" method="POST" style="display:inline" onsubmit="return confirm('Delete this document?');">
+                    <input type="hidden" name="key" value="<%= key %>" />
+                    <button type="submit" class="btn-danger" title="Delete this document">
+                      <span class="icon">🗑️</span> Delete
+                    </button>
+                  </form>
+                <% } else { %>
+                  <span class="muted">—</span>
+                <% } %>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+      <p class="note">Re-uploading a document will replace the one on file. You can also delete a document using the trash icon.</p>
+    </section>
+
+    <!-- Upload Documents -->
+    <section class="card">
+      <h2>Upload Required Documents</h2>
+      <form id="docsForm" action="/driver/upload-docs" method="POST" enctype="multipart/form-data">
+        <label>Driver Profile Photo <span class="size-tag" id="sz_driverProfilePhoto"></span></label>
+        <input type="file" name="driverProfilePhoto" accept="image/*" <%= docs.driverProfilePhoto ? '' : 'required' %> />
+
+        <label>Vehicle Photo (with Number Plate) <span class="size-tag" id="sz_vehiclePhoto"></span></label>
+        <input type="file" name="vehiclePhoto" accept="image/*" <%= docs.vehiclePhoto ? '' : 'required' %> />
+
+        <label>National Identity Document (PDF or Image) <span class="size-tag" id="sz_idDocument"></span></label>
+        <input type="file" name="idDocument" accept="image/*,application/pdf" <%= docs.idDocument ? '' : 'required' %> />
+        <div class="hint">If your PDF is over 10MB, export it at a lower DPI (150–200) or upload photos instead.</div>
+
+        <label>Vehicle Registration (Logbook) <span class="size-tag" id="sz_vehicleRegistration"></span></label>
+        <input type="file" name="vehicleRegistration" accept="image/*,application/pdf" <%= docs.vehicleRegistration ? '' : 'required' %> />
+
+        <label>Driver's License <span class="size-tag" id="sz_driversLicense"></span></label>
+        <input type="file" name="driversLicense" accept="image/*,application/pdf" <%= docs.driversLicense ? '' : 'required' %> />
+
+        <!-- Vehicle Insurance Certificate (hidden)
+        <label>Vehicle Insurance Certificate <span class="size-tag" id="sz_insuranceCertificate"></span></label>
+        <input type="file" name="insuranceCertificate" accept="image/*,application/pdf" <%= docs.insuranceCertificate ? '' : 'required' %> /> -->
+
+        <label>Professional Driving Permit (PDP/PSV) <span class="size-tag" id="sz_pdpOrPsv"></span></label>
+        <input type="file" name="pdpOrPsv" accept="image/*,application/pdf" <%= docs.pdpOrPsv ? '' : 'required' %> />
+
+        <!-- DEKRA Certificate (hidden)
+        <label>DEKRA Certificate <span class="size-tag" id="sz_dekraCertificate"></span></label>
+        <input type="file" name="dekraCertificate" accept="image/*,application/pdf" <%= docs.dekraCertificate ? '' : 'required' %> /> -->
+
+        <label>Police Clearance (Good Conduct) <span class="size-tag" id="sz_policeClearance"></span></label>
+        <input type="file" name="policeClearance" accept="image/*,application/pdf" <%= docs.policeClearance ? '' : 'required' %> />
+
+        <label>Vehicle License Disc <span class="size-tag" id="sz_licenseDisc"></span></label>
+        <input type="file" name="licenseDisc" accept="image/*,application/pdf" <%= docs.licenseDisc ? '' : 'required' %> />
+
+        <button type="submit" class="primary">Upload Documents</button>
+        <p class="note">Max file size: 10MB per file. Images are compressed automatically.</p>
+      </form>
+      <p class="note">By uploading, you agree your documents will be stored securely and reviewed by VayaRide admins.</p>
+    </section>
+  </main>
+
+  <!-- ===== Missing Docs Modal ===== -->
+  <div class="modal" id="missing-docs-modal" aria-hidden="true">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="missTitle" aria-describedby="missDesc" tabindex="-1">
+      <div class="hd">
+        <h3 id="missTitle">Complete your driver application</h3>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="missDesc">
+        <p>You still need to upload the following document(s):</p>
+        <ul class="miss-list">
+          <% if (missing.length) { missing.forEach(k => { %>
+            <li><%= labelMap[k] %></li>
+          <% }) } else { %>
+            <li>All set 🎉</li>
+          <% } %>
+        </ul>
+        <p class="note" style="margin-top:10px">Uploading now speeds up approval.</p>
+      </div>
+      <div class="ft">
+        <button class="btn-ghost" type="button" data-dismiss>Remind me later</button>
+        <button class="btn-light" type="button" id="goUploadBtn">Upload documents</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---- Invite UI wiring ----
+    (function(){
+      const code = document.getElementById('refCode')?.textContent?.trim();
+      const linkField = document.getElementById('refLink');
+      const copyBtn = document.getElementById('copyBtn');
+      const shareBtn = document.getElementById('shareBtn');
+      const openBtn = document.getElementById('openBtn');
+      const shareNote = document.getElementById('shareNote');
+      const qrImg = document.getElementById('qrImg');
+
+      if (code && code.replace(/[-—\s]/g,'').length >= 4) {
+        const origin = location.origin;
+        const link = origin + '/i/d/' + encodeURIComponent(code);
+        if (linkField) linkField.value = link;
+        if (qrImg) qrImg.src = '/qr.png?u=' + encodeURIComponent('/i/d/' + code);
+
+        copyBtn?.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(link);
+            shareNote.textContent = 'Copied!';
+            setTimeout(()=> shareNote.textContent = '', 1600);
+          } catch { alert('Copy failed'); }
+        });
+
+        shareBtn?.addEventListener('click', async () => {
+          try {
+            if (navigator.share) {
+              await navigator.share({
+                title: 'Join VayaRide as a Driver',
+                text: 'Sign up to drive with VayaRide. Use my invite link:',
+                url: link
+              });
+            } else {
+              await navigator.clipboard.writeText(link);
+              alert('Link copied (native share not available).');
+            }
+            const el = document.getElementById('lastShared');
+            if (el) el.textContent = 'Last shared: ' + new Date().toLocaleString();
+          } catch {}
+        });
+
+        openBtn?.addEventListener('click', () => window.open(link, '_blank', 'noopener'));
+      } else {
+        document.querySelectorAll('.share-row button').forEach(b => b.disabled = true);
+        if (qrImg) qrImg.style.opacity = .4;
+        if (linkField) linkField.placeholder = 'Referral link unavailable';
+      }
+    })();
+
+    // ---- Client-side image compression + size display ----
+    const MAX_UPLOAD = 10 * 1024 * 1024; // 10MB
+    const TARGET_MAX_W = 1800;
+    const TARGET_MAX_H = 1800;
+    const JPEG_QUALITY = 0.72;
+
+    function fmtMB(bytes){ return (bytes/1024/1024).toFixed(2) + 'MB'; }
+
+    function setSizeTag(input) {
+      const tag = document.getElementById('sz_' + input.name);
+      if (!tag) return;
+      const f = input.files && input.files[0];
+      tag.textContent = f ? `(${fmtMB(f.size)})` : '';
+    }
+
+    async function compressImageFile(file) {
+      if (!file.type.startsWith('image/')) return file;
+      const bitmap = await createImageBitmap(file);
+      let { width, height } = bitmap;
+      const scale = Math.min(1, TARGET_MAX_W / width, TARGET_MAX_H / height);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', JPEG_QUALITY));
+      if (!blob) return file;
+      if (blob.size >= file.size) return file;
+      return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' });
+    }
+
+    function replaceInputFile(input, newFile) {
+      const dt = new DataTransfer();
+      dt.items.add(newFile);
+      input.files = dt.files;
+      setSizeTag(input);
+    }
+
+    document.querySelectorAll('input[type="file"]').forEach(input => {
+      input.addEventListener('change', async (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (!f) { setSizeTag(input); return; }
+        if (f.type.startsWith('image/')) {
+          try {
+            const compressed = await compressImageFile(f);
+            if (compressed !== f) replaceInputFile(input, compressed);
+            else setSizeTag(input);
+          } catch (err) {
+            console.warn('Compression failed for', input.name, err);
+            setSizeTag(input);
+          }
+        } else {
+          setSizeTag(input);
+        }
+      });
+    });
+
+    document.getElementById('docsForm')?.addEventListener('submit', (e) => {
+      const inputs = e.currentTarget.querySelectorAll('input[type="file"]');
+      for (const input of inputs) {
+        const f = input.files && input.files[0];
+        if (!f) continue;
+        if (f.size > MAX_UPLOAD) {
+          e.preventDefault();
+          alert(`"${input.name}" is too large (${fmtMB(f.size)}). Max is 10MB.\n\nTip: If this is a PDF, re-export at lower DPI (150–200) or upload photos instead.`);
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // ===== Modal helpers =====
+    function openModal(el){
+      const modal = typeof el === 'string' ? document.getElementById(el) : el;
+      if (!modal) return;
+      modal.setAttribute('open','');
+      modal.setAttribute('aria-hidden','false');
+      document.body.style.overflow = 'hidden';
+      function onClick(e){
+        if (e.target.dataset.dismiss !== undefined || e.target.classList.contains('modal')){
+          closeModal(modal);
+        }
+      }
+      modal._dismiss = onClick;
+      modal.addEventListener('click', onClick);
+    }
+    function closeModal(modal){
+      modal.removeAttribute('open');
+      modal.setAttribute('aria-hidden','true');
+      document.body.style.overflow = '';
+      modal.removeEventListener('click', modal._dismiss);
+    }
+    document.querySelectorAll('[data-dismiss]').forEach(btn=> btn.addEventListener('click', e=>{
+      const modal = e.target.closest('.modal');
+      if (modal) closeModal(modal);
+    }));
+
+    // ===== Auto-show missing docs modal on load (if any missing) =====
+    document.addEventListener('DOMContentLoaded', ()=>{
+      const missingCount = Number(document.body.dataset.missing || 0);
+      if (missingCount > 0){
+        openModal('missing-docs-modal');
+      }
+      const goBtn = document.getElementById('goUploadBtn');
+      goBtn?.addEventListener('click', ()=>{
+        closeModal(document.getElementById('missing-docs-modal'));
+        const form = document.getElementById('docsForm');
+        form?.scrollIntoView({ behavior:'smooth', block:'start' });
+        const firstMissingKey = "<%= firstMissing %>";
+        if (firstMissingKey){
+          const input = form?.querySelector(`input[name="${firstMissingKey}"]`);
+          setTimeout(()=> input?.focus(), 450);
+        }
+      });
+    });
+  </script>
+</body>
+</html>

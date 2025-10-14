@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Upload Documents</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{background:#000;color:#fff;font-family:Segoe UI,Arial;margin:0;padding:20px;}
+    .wrap{max-width:800px;margin:0 auto;}
+    .card{background:#151515;border:1px solid #222;border-radius:10px;padding:20px;margin-bottom:20px;}
+    label{display:block;margin:14px 0 6px;}
+    input[type="file"]{display:block}
+    .btn{background:#fff;color:#000;padding:10px 14px;border-radius:6px;text-decoration:none;display:inline-block;margin-top:16px;}
+    .error{color:#ff6b6b}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Upload Documents</h1>
+  <% if (error) { %><p class="error"><%= error %></p><% } %>
+  <div class="card">
+    <form action="/driver/upload-docs" method="post" enctype="multipart/form-data">
+      <label>Driver Profile Photo <input type="file" name="profilePhoto" /></label>
+      <label>Vehicle Photo (with plate) <input type="file" name="vehiclePhoto" /></label>
+      <label>National ID <input type="file" name="nationalId" /></label>
+      <label>Vehicle Registration / LogBook <input type="file" name="vehicleReg" /></label>
+      <label>Driver's License <input type="file" name="driversLicense" /></label>
+      <label>Insurance Certificate <input type="file" name="insuranceCert" /></label>
+      <label>PDP / PSV <input type="file" name="pdpOrPsv" /></label>
+      <label>DEKRA Certificate <input type="file" name="dekraCert" /></label>
+      <label>Police Clearance <input type="file" name="policeClearance" /></label>
+      <label>License Disc <input type="file" name="licenseDisc" /></label>
+      <button class="btn" type="submit">Upload</button>
+      <a class="btn" href="/driver">Back</a>
+    </form>
+  </div>
+</div>
+</body>
+</html>

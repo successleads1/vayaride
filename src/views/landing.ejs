@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title><%= title %> • VayaRide</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+
+  <!-- Favicon / app icons -->
+  <link rel="icon" type="image/png"
+        href="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png">
+  <link rel="apple-touch-icon"
+        href="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png">
+  <meta name="theme-color" content="#000000">
+
+  <!-- canonical base for share/copy (injected from server) -->
+  <script>
+    window.__PUBLIC_URL__ = '<%= publicUrl %>';
+  </script>
+
+  <style>
+    :root{
+      --bg:#000; --text:#fff; --muted:#cfcfcf; --border:#222; --accent:#fff;
+      --radius:14px;
+      --whatsapp:#25D366; --telegram:#0088cc;
+      --overlay:rgba(0,0,0,.64);
+      --card:#0c0c0c; --card-border:#1a1a1a;
+      --ok:#1db954; --no:#ff5c5c;
+      --error:#ff7070;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      background:var(--bg); color:var(--text);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      display:flex; min-height:100vh; align-items:center; justify-content:center;
+      -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+    }
+    .wrap{
+      width:100%;
+      max-width:960px;
+      padding:24px clamp(16px, 3vw, 32px);
+      text-align:center;
+    }
+
+    /* Top-right controls */
+    .top-right{
+      position:fixed; top:12px; right:12px; display:flex; gap:10px; align-items:center;
+      z-index:5000; /* LOWER than modal so modals are always on top */
+      padding-right:max(12px, env(safe-area-inset-right));
+      transition:opacity .15s ease;
+    }
+    body.modal-open .top-right{ pointer-events:none; opacity:.35; }
+    .badge{
+      display:inline-flex; align-items:center; gap:6px;
+      background:#111; color:#fff; border:1px solid #333;
+      border-radius:999px; padding:8px 12px; font-weight:800; letter-spacing:.3px;
+      box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 6px 18px rgba(0,0,0,.35);
+      font-size:12px; text-transform:uppercase;
+    }
+    .dot{ width:6px; height:6px; border-radius:50%; background:#ffd000; display:inline-block; }
+    .ghost-btn{
+      background:transparent; color:#fff; border:1px solid #444; border-radius:12px;
+      padding:10px 12px; font-weight:800; cursor:pointer; box-shadow:none;
+      transition:opacity .15s ease, transform .06s ease;
+    }
+    .ghost-btn:hover{ opacity:.85 }
+    .ghost-btn:active{ transform:translateY(1px) }
+
+    /* Brand */
+    img.logo{
+      width:clamp(96px,12vw,140px);
+      height:clamp(96px,12vw,140px);
+      border-radius:50%;
+      border:3px solid var(--text); object-fit:cover;
+      display:block; margin:0 auto 16px;
+    }
+    h1{
+      margin:8px 0 6px; font-weight:800; letter-spacing:.5px;
+      font-size:clamp(22px, 3.5vw, 34px);
+      line-height:1.15;
+    }
+    p.lead{
+      margin:0 auto 14px; max-width:720px; opacity:.9;
+      font-size:clamp(14px, 2.4vw, 18px);
+    }
+
+    /* Video Card */
+    .video-card{
+      margin:18px auto 10px;
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      background:var(--card);
+      padding:clamp(8px,1.2vw,12px);
+      box-shadow:0 0 0 3px rgba(255,255,255,0.04) inset;
+    }
+    .frame{
+      position:relative; overflow:hidden; border-radius:12px;
+      background:#000; border:1px solid var(--card-border);
+      aspect-ratio:16/9;
+    }
+    .frame video{ width:100%; height:100%; display:block; object-fit:cover; }
+    .caption{
+      margin-top:10px; color:var(--muted); font-size:clamp(12px,1.8vw,13px);
+      letter-spacing:.02em;
+    }
+
+    /* CTA buttons */
+    .links{
+      margin-top:22px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;
+    }
+    a.btn, button.btn{
+      padding:clamp(12px,1.8vw,14px) clamp(18px,2.4vw,22px);
+      border-radius:12px; text-decoration:none; font-weight:800;
+      font-size:clamp(15px,2.4vw,16px); line-height:1.1; display:inline-block;
+      border:1px solid transparent; min-width:clamp(140px,20vw,180px);
+      box-shadow:0 4px 0 rgba(255,255,255,0.08);
+      transition:transform .06s ease, filter .15s ease, opacity .15s ease;
+      will-change:transform; cursor:pointer;
+    }
+    a.btn:active, button.btn:active{ transform:translateY(1px) }
+    a.btn:hover, button.btn:hover{ filter:brightness(0.92) }
+    a.btn.whatsapp{ background:var(--whatsapp); color:#000; border-color:var(--whatsapp); }
+    a.btn.telegram{ background:var(--telegram); color:#fff; border-color:var(--telegram); }
+    a.btn.driver{ background:var(--accent); color:#000; border-color:var(--accent); }
+
+    /* Modal */
+    .modal{
+      position:fixed; inset:0; display:none;
+      align-items:center; justify-content:center;
+      padding:24px;
+      z-index:100000; /* above everything */
+    }
+    .modal[open]{ display:flex }
+    .modal .backdrop{
+      position:absolute; inset:0; background:var(--overlay);
+      opacity:0; transition:opacity .18s ease;
+    }
+    .modal[open] .backdrop{ opacity:1 }
+    .modal .dialog{
+      position:relative; width:100%; max-width:min(720px, 96vw);
+      background:var(--card); color:#fff; border:1px solid var(--card-border);
+      border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,.55), 0 0 0 3px rgba(255,255,255,.04) inset;
+      transform:translateY(8px) scale(.98); opacity:0;
+      transition:transform .18s ease, opacity .18s ease; outline:none;
+    }
+    .modal[open] .dialog{ transform:translateY(0) scale(1); opacity:1; }
+    .dialog .hd{ display:flex; align-items:center; justify-content:space-between;
+      padding:16px 18px; border-bottom:1px solid var(--card-border); }
+    .dialog h2{ margin:0; font-size:20px; letter-spacing:.2px; }
+    .dialog .x{ background:#1a1a1a; color:#fff; border:1px solid #333;
+      width:34px; height:34px; border-radius:10px; cursor:pointer; font-size:18px; line-height:0; }
+    .dialog .bd{ text-align:left; padding:16px 18px 6px; font-size:15px; color:#e9e9e9; }
+    .dialog p{ margin:0 0 12px; line-height:1.55 }
+    .dialog ul{ margin:8px 0 12px 18px }
+    .dialog li{ margin:6px 0 }
+    .dialog small{ color:#cfcfcf }
+    .dialog .bd a{ color:#fff; text-decoration:underline; }
+    .dialog .ft{ display:flex; justify-content:flex-end; gap:10px; padding:14px 18px 18px; border-top:1px solid var(--card-border); }
+    .dialog .ft .btn{ min-width:auto; padding:10px 14px; font-weight:700; border-radius:10px; }
+
+    /* Feedback */
+    .vote-row{ display:flex; gap:10px; margin:8px 0 6px; }
+    .vote{ display:inline-flex; align-items:center; gap:8px; border:1px solid #2a2a2a; background:#121212; color:#fff;
+      padding:10px 14px; border-radius:12px; cursor:pointer; user-select:none;
+      transition:filter .15s ease, transform .06s ease; }
+    .vote:hover{ filter:brightness(1.05) }
+    .vote:active{ transform:translateY(1px) }
+    .vote.ok{ border-color:#1f3826 } .vote.no{ border-color:#3a1f1f }
+    .count{ font-weight:800; min-width:2ch; text-align:right }
+    .stat{ color:#cfcfcf; margin-top:4px; font-size:13px }
+
+    .row{ display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 0 }
+    .field{ flex:1 1 220px; display:flex; flex-direction:column; gap:6px; }
+    .field label{ font-weight:700; font-size:13px; color:#e9e9e9 }
+    .field input, textarea.feedback{
+      width:100%; background:#0f0f0f; color:#fff; border:1px solid #2a2a2a; border-radius:10px;
+      padding:10px 12px; font:inherit;
+    }
+    textarea.feedback{ min-height:96px; resize:vertical; }
+    .hint{ font-size:12px; color:#cfcfcf }
+    .error{ color:#ff7070; font-size:12px; margin-top:4px; display:none; }
+
+    /* Share */
+    .share-grid{ display:grid; grid-template-columns:1fr; gap:12px; }
+    .url-row{ display:flex; gap:10px; align-items:center; }
+    .url-row input{
+      flex:1; background:#0f0f0f; color:#fff; border:1px solid #2a2a2a; border-radius:10px; padding:10px 12px;
+    }
+    .qr-wrap{ display:flex; justify-content:center; margin-top:8px; }
+    .qr-wrap img{ display:block; }
+
+    /* Toast */
+    .toast{
+      position:fixed; right:16px; bottom:16px;
+      z-index:100050;
+      background:#111; color:#fff; border:1px solid #333; border-radius:12px;
+      padding:12px 14px; font-weight:700; opacity:0; transform:translateY(6px);
+      transition:opacity .18s ease, transform .18s ease; box-shadow:0 8px 24px rgba(0,0,0,.45);
+    }
+    .toast.show{ opacity:1; transform:translateY(0); }
+
+    @media (max-width: 480px){
+      .links{ flex-direction:column; align-items:stretch; gap:10px }
+      a.btn, button.btn{ width:100% }
+      .dialog{ max-width:96vw }
+      .top-right{ gap:8px; right:8px; top:8px }
+      .badge{ padding:7px 10px }
+      .ghost-btn{ padding:8px 10px }
+    }
+    @media (prefers-reduced-motion: reduce){
+      .links a, .links button, .modal .backdrop, .modal .dialog, .toast{ transition:none }
+    }
+    @supports(padding:max(0px)){
+      .wrap{ padding-left:max(16px, env(safe-area-inset-left));
+             padding-right:max(16px, env(safe-area-inset-right)); }
+      .modal{ padding-left:max(16px, env(safe-area-inset-left));
+              padding-right:max(16px, env(safe-area-inset-right)); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Top-right controls -->
+  <div class="top-right" role="group" aria-label="Beta & info">
+    <span class="badge" title="This is an early version"><span class="dot" aria-hidden="true"></span>BETA</span>
+    <button class="ghost-btn" type="button" data-open-modal="#about-modal" aria-haspopup="dialog" aria-controls="about-modal">About</button>
+    <button class="ghost-btn" type="button" data-open-modal="#feedback-modal" aria-haspopup="dialog" aria-controls="feedback-modal">Add your view</button>
+    <button class="ghost-btn" type="button" data-open-modal="#share-modal" aria-haspopup="dialog" aria-controls="share-modal">Share</button>
+  </div>
+
+  <div class="wrap">
+    <img class="logo" src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide" />
+    <h1>VayaRide</h1>
+    <p class="lead">Move smarter. Drivers apply and riders ride—securely.</p>
+
+    <!-- Video -->
+    <section class="video-card" aria-label="VayaRide preview video">
+      <div class="frame">
+        <video src="/video.mp4" autoplay muted loop playsinline preload="metadata" aria-label="VayaRide in action demo video">
+          <source src="/video.mp4" type="video/mp4" />
+          Your browser does not support the video tag.
+        </video>
+      </div>
+      <div class="caption">A quick look at VayaRide in motion.</div>
+    </section>
+
+    <!-- CTAs -->
+    <div class="links">
+      <a class="btn driver" href="/driver/register">Become a Driver</a>
+      <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">📱 Book Now (WhatsApp)</a>
+      <a class="btn telegram" href="https://t.me/vayarider_bot" target="_blank" rel="noopener">🚖 Book Now (Telegram)</a>
+    </div>
+  </div>
+
+  <!-- About Modal -->
+  <div class="modal" id="about-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" aria-describedby="about-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="about-title">About VayaRide</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="about-desc">
+        <!-- Updated copy: removed "We're building..." -->
+        <p><strong>VayaRide is redefining how South Africa moves.</strong></p>
+        <p>Seamlessly integrated with <strong>WhatsApp</strong> and <strong>Telegram</strong>, our smart platform lets you request a ride in seconds — no apps, no forms, just natural conversation. Get matched with verified drivers, track them live, and pay your way with confidence.</p>
+        <ul>
+          <li><strong>Professional drivers first:</strong> connect riders with verified, highly-rated drivers.</li>
+          <li><strong>Safety by design:</strong> live status, transparent pricing, and driver ratings for every trip.</li>
+          <li><strong>Frictionless booking:</strong> share your location or type the address; AI handles the details.</li>
+          <li><strong>Pay your way:</strong> Cash or card (PayFast).</li>
+        </ul>
+        <p><strong>Our vision</strong> is simple: reliable city movement powered by professionalism and trust. Every ride should feel safe, respectful, and on time.</p>
+        <p><small>Questions? Email us at
+          <a href="mailto:vayaride0@gmail.com" class="link-white">vayaride0@gmail.com</a>.
+        </small></p>
+      </div>
+      <div class="ft">
+        <button class="ghost-btn" type="button" data-dismiss>Close</button>
+        <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">Open WhatsApp</a>
+        <a class="btn telegram" href="https://t.me/vayarider_bot" target="_blank" rel="noopener">Open Telegram</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feedback Modal -->
+  <div class="modal" id="feedback-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="fb-title" aria-describedby="fb-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="fb-title">Add your view</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="fb-desc">
+        <p><strong>Do you like the product?</strong></p>
+        <div class="vote-row" role="group" aria-label="Product sentiment">
+          <button class="vote ok" type="button" id="fb-up" aria-pressed="false" aria-label="I like it">
+            👍 <span class="count" id="cnt-up">0</span>
+          </button>
+          <button class="vote no" type="button" id="fb-down" aria-pressed="false" aria-label="Not yet">
+            👎 <span class="count" id="cnt-down">0</span>
+          </button>
+        </div>
+        <div class="stat" id="fb-stat">Total votes: 0 — 👍 0 | 👎 0</div>
+
+        <hr style="border:0;border-top:1px solid var(--card-border); margin:14px 0" />
+
+        <div class="row">
+          <div class="field">
+            <label for="fb-name">Your name</label>
+            <input id="fb-name" type="text" placeholder="e.g., Thandi" autocomplete="name" />
+          </div>
+          <div class="field">
+            <label for="fb-contact">Email or phone</label>
+            <input id="fb-contact" type="text" placeholder="e.g., thandi@example.com or +27 82 123 4567" autocomplete="email" />
+          </div>
+        </div>
+        <div class="error" id="fb-err">Please enter your name and a valid email or phone number.</div>
+
+        <label for="fb-text" style="margin-top:10px;"><strong>Leave a comment (optional)</strong></label>
+        <textarea id="fb-text" class="feedback" placeholder="What should we improve or keep doing?"></textarea>
+        <small id="fb-note" class="hint">During <strong>BETA</strong>, feedback is stored locally on your device unless you connect an account.</small>
+      </div>
+      <div class="ft">
+        <button class="ghost-btn" type="button" data-dismiss>Close</button>
+        <button class="btn driver" type="button" id="fb-send">Send feedback</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Share / QR Modal -->
+  <div class="modal" id="share-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="share-title" aria-describedby="share-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="share-title">Share VayaRide</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="share-desc">
+        <div class="share-grid">
+          <div class="url-row">
+            <input id="share-url" type="text" readonly />
+            <button class="ghost-btn" id="btn-copy" type="button" title="Copy link">Copy</button>
+          </div>
+          <button class="btn driver" id="btn-native-share" type="button">Share with a friend</button>
+          <div class="qr-wrap">
+            <img id="qr-img" alt="QR code to open this site" width="220" height="220"
+                 style="border-radius:12px;border:1px solid var(--card-border);background:#fff"/>
+          </div>
+          <small class="hint">Scan this QR with your phone camera to open the site.</small>
+        </div>
+      </div>
+      <div class="ft">
+        <button class="ghost-btn" type="button" data-dismiss>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite">Thanks for your feedback! 🙏</div>
+
+  <script>
+    // Autoplay fallback
+    (function(){
+      const v = document.querySelector('video');
+      if (!v) return;
+      const p = v.play && v.play();
+      if (p && typeof p.then === 'function'){ p.catch(()=>{ v.controls = true; }); }
+      else { v.controls = true; }
+    })();
+
+    // Modal manager (adds/removes body.modal-open so header dims/disabled)
+    (function(){
+      function getFocusable(container){
+        return Array.from(container.querySelectorAll(
+          'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        ));
+      }
+      function openModal(modal){
+        if (!modal) return;
+        const dialog = modal.querySelector('.dialog');
+        modal.setAttribute('open','');
+        modal.setAttribute('aria-hidden','false');
+        document.body.style.overflow = 'hidden';
+        document.body.classList.add('modal-open');
+        setTimeout(()=> dialog?.focus(), 0);
+        modal.dispatchEvent(new CustomEvent('modal:open'));
+        function onKeydown(e){
+          if (e.key === 'Escape'){ e.preventDefault(); closeModal(modal); }
+          if (e.key === 'Tab'){
+            const f = getFocusable(dialog).filter(el => el.offsetParent !== null);
+            if (!f.length) return;
+            const first = f[0], last = f[f.length-1];
+            if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+          }
+        }
+        function onBackdrop(e){
+          if (e.target.classList.contains('backdrop') || e.target.dataset.dismiss !== undefined) closeModal(modal);
+        }
+        modal._onKeydown = onKeydown;
+        modal._onBackdrop = onBackdrop;
+        document.addEventListener('keydown', onKeydown);
+        modal.addEventListener('click', onBackdrop);
+      }
+      function closeModal(modal){
+        if (!modal) return;
+        document.removeEventListener('keydown', modal._onKeydown);
+        modal.removeEventListener('click', modal._onBackdrop);
+        modal.removeAttribute('open');
+        modal.setAttribute('aria-hidden','true');
+        document.body.style.overflow = '';
+        document.body.classList.remove('modal-open');
+      }
+      document.querySelectorAll('[data-open-modal]').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const sel = btn.getAttribute('data-open-modal');
+          const modal = document.querySelector(sel);
+          openModal(modal);
+        });
+      });
+      document.querySelectorAll('[data-dismiss]').forEach(el=>{
+        el.addEventListener('click', ()=>{
+          const modal = el.closest('.modal');
+          closeModal(modal);
+        });
+      });
+    })();
+
+    // Toast helper
+    function showToast(msg='Done'){
+      const t = document.getElementById('toast');
+      if (!t) return;
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(()=> t.classList.remove('show'), 2200);
+    }
+
+    // Feedback logic (localStorage-backed)
+    (function(){
+      const upBtn = document.getElementById('fb-up');
+      const downBtn = document.getElementById('fb-down');
+      const cntUp = document.getElementById('cnt-up');
+      const cntDown = document.getElementById('cnt-down');
+      const stat = document.getElementById('fb-stat');
+      const nameEl = document.getElementById('fb-name');
+      const contactEl = document.getElementById('fb-contact');
+      const err = document.getElementById('fb-err');
+      const txt = document.getElementById('fb-text');
+      const send = document.getElementById('fb-send');
+      const modal = document.getElementById('feedback-modal');
+
+      const KEY = 'vr_feedback';
+      function load(){ try{ return JSON.parse(localStorage.getItem(KEY)) || { up:0, down:0, comments:[], lastVote:null }; }catch{ return { up:0, down:0, comments:[], lastVote:null }; } }
+      function save(d){ try{ localStorage.setItem(KEY, JSON.stringify(d)); }catch{} }
+      function render(){
+        const d = load();
+        cntUp.textContent = d.up;
+        cntDown.textContent = d.down;
+        stat.textContent = `Total votes: ${d.up + d.down} — 👍 ${d.up} | 👎 ${d.down}`;
+        upBtn.setAttribute('aria-pressed', d.lastVote === 'up' ? 'true' : 'false');
+        downBtn.setAttribute('aria-pressed', d.lastVote === 'down' ? 'true' : 'false');
+      }
+      function validContact(v){
+        const s = (v||'').trim();
+        if (!s) return false;
+        const isEmail = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(s);
+        const isPhone = /^\+?\d[\d\s()-]{5,}$/.test(s);
+        return isEmail || isPhone;
+      }
+      upBtn?.addEventListener('click', ()=>{ const d = load(); if (d.lastVote === 'up') return render(); if (d.lastVote === 'down') d.down = Math.max(0, d.down - 1); d.up += 1; d.lastVote='up'; save(d); render(); });
+      downBtn?.addEventListener('click', ()=>{ const d = load(); if (d.lastVote === 'down') return render(); if (d.lastVote === 'up') d.up = Math.max(0, d.up - 1); d.down += 1; d.lastVote='down'; save(d); render(); });
+      send?.addEventListener('click', ()=>{
+        const name = (nameEl.value||'').trim();
+        const contact = (contactEl.value||'').trim();
+        const comment = (txt.value||'').trim();
+        if (!name || !validContact(contact)){
+          err.style.display = 'block';
+          [nameEl, contactEl].forEach(el=>{
+            el.style.borderColor = (!el.value || (el===contactEl && !validContact(contact))) ? 'var(--error)' : '#2a2a2a';
+          });
+          return;
+        }
+        err.style.display = 'none';
+        [nameEl, contactEl].forEach(el=> el.style.borderColor = '#2a2a2a');
+        const d = load();
+        d.comments.push({ t: Date.now(), name, contact, msg: comment });
+        save(d);
+        render();
+        nameEl.value=''; contactEl.value=''; txt.value='';
+        modal.querySelector('[data-dismiss]')?.click();
+        showToast('Thanks for your feedback! 🙏');
+      });
+      [nameEl, contactEl].forEach(el=> el.addEventListener('input', ()=>{ err.style.display='none'; el.style.borderColor='#2a2a2a'; }));
+      modal.addEventListener('modal:open', render);
+      render();
+    })();
+
+    // Share modal (copy + native share + SERVER QR)
+    (function(){
+      const modal = document.getElementById('share-modal');
+      const urlInput = document.getElementById('share-url');
+      const btnCopy = document.getElementById('btn-copy');
+      const btnNative = document.getElementById('btn-native-share');
+      const qrImg = document.getElementById('qr-img');
+
+      function canonicalUrl(){
+        const base = (window.__PUBLIC_URL__ || '').replace(/\/$/, '');
+        const path = window.location.pathname || '/';
+        return base ? (base + path) : window.location.href;
+      }
+      function setQRFor(){
+        const publicBase = (window.__PUBLIC_URL__ || '').replace(/\/$/, '');
+        const herePath = window.location.pathname || '/';
+        const q = publicBase ? herePath : window.location.href;
+        const param = /^https?:\/\//i.test(q) ? q : (q.startsWith('/') ? q : '/');
+        qrImg.src = '/qr.png?u=' + encodeURIComponent(param);
+      }
+
+      btnCopy.addEventListener('click', async ()=>{
+        try{ await navigator.clipboard.writeText(urlInput.value); showToast('Link copied!'); }
+        catch{ urlInput.select(); document.execCommand('copy'); showToast('Link copied!'); }
+      });
+
+      btnNative.addEventListener('click', async ()=>{
+        const u = urlInput.value;
+        if (navigator.share){
+          try{ await navigator.share({ title: 'VayaRide — Book fast on WhatsApp/Telegram', text: 'Try VayaRide with me:', url: u }); }
+          catch{}
+        } else {
+          showToast('Sharing not supported — copy the link or scan the QR.');
+        }
+      });
+
+      modal.addEventListener('modal:open', ()=>{
+        const u = canonicalUrl();
+        urlInput.value = u;
+        setQRFor();
+      });
+    })();
+  </script>
+</body>
+</html>
