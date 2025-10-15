@@ -1,0 +1,42 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+
+# Env & secrets
+.env
+.env.*         # all env files
+!.env.example  # keep the example env
+*.pem
+*.key
+
+# WhatsApp Baileys sessions (sensitive!)
+baileys_auth_info/
+
+# Builds/coverage/cache
+dist/
+build/
+coverage/
+.tmp/
+tmp/
+.cache/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Upload/output (none expected, but safe to ignore)
+uploads/
+public/uploads/
+
+# Generated WhatsApp QR
+public/wa-qr.png
+# WhatsApp Baileys driver sessions
+baileys_auth_driver/
+*.mp4
+*.mp4

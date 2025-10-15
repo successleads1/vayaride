@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Live Trip • VayaRide</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+
+  <!-- App CSS -->
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- Socket.io -->
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+<div class="layout">
+  <header>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide" />
+      <span style="font-weight:700">VayaRide</span>
+    </div>
+    <div class="status">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Loading trip…</span>
+    </div>
+  </header>
+
+  <div class="map-wrap">
+    <div id="map"></div>
+
+    <!-- Legend -->
+    <div class="legend" id="legend">
+      <div class="row"><span class="dot pick"></span> Pickup</div>
+      <div class="row"><span class="dot drop"></span> Dropoff</div>
+      <div class="row"><span class="dot driver"></span> Driver (live)</div>
+    </div>
+
+    <!-- Chips -->
+    <div id="followChip" class="chip" style="display:none">📍 Following driver</div>
+    <!-- <div id="gpsChip" class="chip gps" style="display:none">📡 Sharing live GPS from this device</div> -->
+
+    <!-- LEFT rail -->
+    <div id="leftRail" class="sidepanel-left">
+      <div class="iconwrap">
+        <span class="icon-label">Waze</span>
+        <a id="btnWaze" class="iconbtn brand-waze" href="#" target="_blank" rel="noopener" title="Open in Waze">
+          <img alt="Waze" src="https://cdn-icons-png.flaticon.com/512/732/732022.png" />
+        </a>
+      </div>
+      <div class="iconwrap">
+        <span class="icon-label">Cancel</span>
+        <button id="btnCancel" class="iconbtn danger" title="Cancel Trip">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <line x1="9" y1="9" x2="15" y2="15"></line>
+            <line x1="15" y1="9" x2="9" y2="15"></line>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- RIGHT rail -->
+    <div class="sidepanel">
+      <div class="iconwrap">
+        <span class="icon-label">Pickup</span>
+        <button id="btnPicked" class="iconbtn warn" title="Picked Up" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <polyline points="20 6 9 17 4 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></polyline>
+          </svg>
+        </button>
+      </div>
+      <div class="iconwrap">
+        <span class="icon-label">Start</span>
+        <button id="btnStart" class="iconbtn primary" title="Start Trip">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <polygon points="5,3 19,12 5,21" fill="currentColor"></polygon>
+          </svg>
+        </button>
+      </div>
+
+      <div class="iconwrap">
+        <span class="icon-label">Voice</span>
+        <button id="btnVoice" class="iconbtn" title="Voice">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <polygon points="4 10 8 10 13 5 13 19 8 14 4 14" fill="currentColor"></polygon>
+            <path d="M16 9a5 5 0 0 1 0 6" stroke="currentColor" stroke-width="2" fill="none"></path>
+            <path d="M19 7a8 8 0 0 1 0 10" stroke="currentColor" stroke-width="2" fill="none"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="iconwrap">
+        <span class="icon-label">Follow</span>
+        <button id="btnFollow" class="iconbtn subtle" title="Follow" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"></circle>
+            <polygon points="12,8 15,15 9,15" fill="currentColor"></polygon>
+          </svg>
+        </button>
+      </div>
+      <div class="iconwrap">
+        <span class="icon-label">Recenter</span>
+        <button id="btnRecenter" class="iconbtn subtle" title="Recenter">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" fill="none"></circle>
+            <path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="2" fill="none"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="iconwrap">
+        <span class="icon-label">Telegram</span>
+        <a id="btnBackTelegram" class="iconbtn brand-tg" href="#" title="Open in Telegram" rel="noopener">
+          <img alt="Telegram" src="https://cdn.jsdelivr.net/npm/simple-icons@9.22.0/icons/telegram.svg" />
+        </a>
+      </div>
+      <div class="iconwrap">
+        <span class="icon-label">WhatsApp</span>
+        <a id="btnBackWhatsapp" class="iconbtn brand-wa" href="https://wa.me/" title="Open in WhatsApp" rel="noopener">
+          <img alt="WhatsApp" src="https://cdn.jsdelivr.net/npm/simple-icons@9.22.0/icons/whatsapp.svg" />
+        </a>
+      </div>
+    </div>
+
+    <!-- Bottom CTA -->
+    <div id="bottomCta" class="bottom-cta" style="display:none">
+      <button id="btnFinish" title="Finish Trip"><b>FINISH</b></button>
+    </div>
+
+    <!-- Big Start Panel (driver only) -->
+    <div id="startPanel" class="start-panel" aria-hidden="true">
+      <div class="start-card">
+        <h2>Ready to roll?</h2>
+        <p>Tap to start navigation to the pickup.</p>
+        <button id="btnStartBig" class="btn primary big">Start Trip</button>
+        <div class="hint">Trip: <span id="startPanelRideId">—</span></div>
+      </div>
+    </div>
+
+    <!-- Arrived modal -->
+    <div id="arriveModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="arriveTitle">
+      <div class="card">
+        <h3 id="arriveTitle">Arrived at Pickup</h3>
+        <p>Your vehicle is outside. You can notify the rider or start the trip.</p>
+        <div class="actions">
+          <button id="btnCloseModal">Close</button>
+          <button id="btnNotifyRider" class="primary">Notify Rider</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cancel modal -->
+    <div id="cancelModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="cancelTitle">
+      <div class="card">
+        <h3 id="cancelTitle">Cancel Trip</h3>
+        <p>Please choose a reason. The other party will be notified.</p>
+        <div class="reason-list" id="reasonList">
+          <label class="reason-item"><input type="radio" name="cxl" value="No longer needed"> No longer needed</label>
+          <label class="reason-item"><input type="radio" name="cxl" value="Wrong address"> Wrong address</label>
+          <label class="reason-item"><input type="radio" name="cxl" value="Took another ride"> Took another ride</label>
+          <label class="reason-item"><input type="radio" name="cxl" value="Vehicle issue"> Vehicle issue</label>
+          <label class="reason-item"><input type="radio" name="cxl" value="Safety concern"> Safety concern</label>
+          <label class="reason-item"><input type="radio" name="cxl" value="Other"> Other</label>
+        </div>
+        <div class="other-wrap" id="otherWrap" style="display:none">
+          <textarea id="otherText" placeholder="Describe the reason…"></textarea>
+        </div>
+        <div class="actions">
+          <button id="btnCancelClose">Close</button>
+          <button id="btnCancelSend" class="primary">Send & Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Finish modal -->
+    <div id="finishModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="finishTitle">
+      <div class="card">
+        <h3 id="finishTitle">Finish Trip</h3>
+        <p>Select how the rider paid, then we’ll finish the trip and notify them.</p>
+        <div class="actions" style="justify-content:space-between">
+          <button id="btnFinishClose">Close</button>
+          <div style="display:flex;gap:10px">
+            <button id="btnFinishPaid" class="primary" title="Payfast (card)">Payfast</button>
+            <button id="btnFinishCash" class="primary" title="Cash received">Cash</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trip Summary modal -->
+    <audio id="ringtone" src="/messagesound.mp3" preload="auto"></audio>
+    <div id="summaryModal" class="summary-modal" role="dialog" aria-modal="true" aria-labelledby="summaryTitle">
+      <div class="summary-card">
+        <h3 id="summaryTitle" class="summary-title">Trip Summary</h3>
+        <div class="summary-amount" id="sumAmount">R0</div>
+        <p class="summary-sub" id="sumSub">Final earnings</p>
+        <div class="summary-rows">
+          <div class="summary-row"><div class="k">Distance</div><div class="v" id="sumDistance">–</div></div>
+          <div class="summary-row"><div class="k">Payment</div><div class="v" id="sumPayment">–</div></div>
+        </div>
+        <div class="summary-actions">
+          <button id="btnSummaryClose" class="btn">Close</button>
+          <button id="btnSummaryBack" class="btn primary">Back to Telegram</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Terminal screen -->
+    <div id="closeScreen" class="end-screen" style="display:none">
+      <div class="end-card">
+        <h2>Trip cancelled</h2>
+        <p>This tracking page has expired. You can safely close this tab.</p>
+        <div class="end-actions">
+          <button id="btnHardClose" class="btn primary">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- App JS -->
+<script src="app.js" defer></script>
+</body>
+</html>
+
+

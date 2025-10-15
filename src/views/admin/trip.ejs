@@ -1,0 +1,63 @@
+<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin • Trip</title>
+<style>
+:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+.layout{display:flex;min-height:100vh}
+aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand img{width:44px;height:44px;border-radius:50%;border:2px solid #fff}
+.brand h1{font-size:16px;margin:0}
+nav a{display:block;padding:10px;border-radius:8px;text-decoration:none;color:#fff;border:1px solid transparent}
+nav a:hover{background:#101010;border-color:#222}
+main{flex:1;padding:20px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+h2{margin:0 0 10px;font-size:18px}
+.badge{padding:4px 8px;border-radius:999px;border:1px solid #333;background:#111}
+.timeline{border-left:2px solid #222;margin-left:10px;padding-left:12px}
+.ev{margin-bottom:12px}
+.meta{color:#bbb;font-size:12px}
+</style></head><body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="">
+      <h1>VayaRide Admin</h1>
+    </div>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/admin/trips">Trips</a>
+    </nav>
+    <form action="/admin/logout" method="POST" style="margin-top:12px">
+      <button style="background:#111;color:#fff;border:1px solid #222;padding:8px 10px;border-radius:8px;cursor:pointer">Logout</button>
+    </form>
+  </aside>
+  <main>
+    <section class="card">
+      <h2><%= tripName %></h2>
+      <div>Status: <span class="badge"><%= trip.status %></span></div>
+      <div>Driver: <%= (trip.driverId && (trip.driverId.name || trip.driverId.email)) || '—' %></div>
+      <div>Estimate: <%= typeof trip.estimate==='number' ? ('R'+trip.estimate) : '—' %></div>
+      <div style="margin-top:8px">
+        <a href="/track.html?rideId=<%= trip._id %>" target="_blank" style="color:#fff;border:1px solid #333;padding:6px 10px;border-radius:8px;text-decoration:none">Open Live Map</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Timeline</h2>
+      <div class="timeline">
+        <% activity.forEach(a => { %>
+          <div class="ev">
+            <div><b><%= a.type.toUpperCase() %></b> — <%= a.message || '' %></div>
+            <div class="meta"><%= new Date(a.createdAt).toLocaleString() %> • <%= a.actorType %> <%= a.actorId || '' %></div>
+          </div>
+        <% }) %>
+        <% if (!activity.length) { %>
+          <div class="meta">No events yet.</div>
+        <% } %>
+      </div>
+    </section>
+  </main>
+</div>
+</body></html>

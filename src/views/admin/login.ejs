@@ -1,0 +1,27 @@
+<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin • Login</title>
+<style>
+:root{--bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;--accent:#fff}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+.wrapper{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:22px}
+h1{margin:0 0 12px;font-size:20px}
+label{display:block;margin:10px 0 6px}
+input{width:100%;padding:12px;border-radius:8px;border:1px solid var(--border);background:#1a1a1a;color:#fff}
+button{width:100%;margin-top:14px;padding:12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#000;font-weight:700;cursor:pointer}
+.err{margin-top:10px;color:#ff5e5e}
+.logo{display:block;margin:0 auto 12px;width:70px;height:70px;border-radius:50%;border:2px solid #fff;object-fit:cover}
+</style></head><body>
+<div class="wrapper"><div class="card">
+  <img class="logo" src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide"/>
+  <h1>Admin Login</h1>
+  <% if (err) { %><div class="err">❌ <%= err %></div><% } %>
+  <form method="POST" action="/admin/login">
+    <label>Email</label>
+    <input type="email" name="email" required />
+    <label>Password</label>
+    <input type="password" name="password" required />
+    <button type="submit">Login</button>
+  </form>
+</div></div></body></html>

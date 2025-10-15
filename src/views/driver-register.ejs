@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Driver Register • VayaRide</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; background:#000; color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial }
+    .wrap { max-width:560px; margin:40px auto; padding:20px; background:#111; border-radius:10px; box-shadow:0 0 20px rgba(255,255,255,.06) }
+    h1 { text-align:center }
+    label { display:block; margin-top:14px; font-weight:600 }
+    input, select { width:100%; padding:12px; border:none; border-radius:6px; background:#222; color:#fff; margin-top:6px }
+    small.help { display:block; margin-top:6px; opacity:.8 }
+    button { width:100%; margin-top:16px; padding:12px; border:none; border-radius:6px; font-weight:700; background:#fff; color:#000; cursor:pointer }
+    button:hover { background:#ddd }
+    .err { color:#ff6b6b; margin-top:10px; text-align:center }
+    .topback { display:block; text-align:center; margin:20px auto 0; color:#fff; opacity:.8; text-decoration:none }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Driver Registration</h1>
+
+    <% if (typeof error !== 'undefined' && error) { %>
+      <div class="err"><%= error %></div>
+    <% } %>
+
+    <form method="POST" action="/driver/register" id="regForm" autocomplete="on">
+      <label for="name">Full name</label>
+      <input id="name" name="name" required
+             value="<%= form && form.name ? form.name : '' %>" />
+
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required autocomplete="email"
+             value="<%= form && form.email ? form.email : '' %>" />
+
+      <label for="phone">Phone (South Africa)</label>
+      <input id="phone" name="phone" type="tel" inputmode="tel" required
+             placeholder="071 234 5678"
+             value="<%= form && form.phone ? form.phone : '' %>" />
+      <small class="help">We save it as +27… automatically.</small>
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required
+             pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,}"
+             title="Min 8 chars, include upper, lower, number and special, no spaces" />
+      <small class="help">Min 8 chars with upper, lower, number &amp; special. No spaces.</small>
+
+      <label for="confirm">Confirm Password</label>
+      <input id="confirm" name="confirm" type="password" required />
+
+      <label for="vehicleType">Vehicle Type</label>
+      <select id="vehicleType" name="vehicleType" required>
+        <option value="normal"  <%= form && form.vehicleType==='normal'  ? 'selected' : '' %>>VayaRide Normal</option>
+        <option value="comfort" <%= form && form.vehicleType==='comfort' ? 'selected' : '' %>>VayaRide Comfort</option>
+        <option value="luxury"  <%= form && form.vehicleType==='luxury'  ? 'selected' : '' %>>VayaRide Luxury</option>
+        <option value="xl"      <%= form && form.vehicleType==='xl'      ? 'selected' : '' %>>VayaRide XL</option>
+      </select>
+
+      <button type="submit">Create Account</button>
+    </form>
+
+    <a class="topback" href="/driver/login">Have an account? Log in</a>
+    <a class="topback" href="/">← Back to Home</a>
+  </div>
+
+  <script>
+    // Optional: client-side confirm check to give instant feedback
+    (function(){
+      const pw = document.getElementById('password');
+      const cf = document.getElementById('confirm');
+      function check(){
+        if (!cf.value) { cf.setCustomValidity(''); return; }
+        if (pw.value !== cf.value) { cf.setCustomValidity('Passwords do not match'); }
+        else { cf.setCustomValidity(''); }
+      }
+      pw.addEventListener('input', check);
+      cf.addEventListener('input', check);
+    })();
+  </script>
+</body>
+</html>

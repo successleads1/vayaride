@@ -1,0 +1,9 @@
+{
+  "watch": ["server.js", "src"],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "baileys_auth_info/**",
+    "public/wa-qr.png",
+    "wa-logs.txt"
+  ]
+}

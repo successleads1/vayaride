@@ -1,0 +1,468 @@
+<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin • Riders</title>
+<style>
+:root{
+  --bg:#000;--card:#0f0f0f;--text:#fff;--muted:#bbb;--border:#222;
+  --accent:#1b3ea4;--danger:#a33;--ok:#00e676
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+a{color:#fff}
+
+.layout{display:flex;min-height:100vh}
+aside{width:240px;border-right:1px solid var(--border);background:#0a0a0a;padding:16px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand img{width:44px;height:44px;border-radius:50%;border:2px solid #fff}
+.brand h1{font-size:16px;margin:0}
+nav a{display:block;padding:10px;border-radius:8px;text-decoration:none;color:#fff;border:1px solid transparent}
+nav a:hover{background:#101010;border-color:#222}
+
+main{flex:1;padding:20px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+h2{margin:0 0 10px;font-size:18px}
+
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{padding:10px;border-bottom:1px dashed #222;text-align:left;vertical-align:top}
+
+.filter{margin-bottom:12px;color:#bbb;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.input{background:#0b0b0b;border:1px solid var(--border);color:#fff;padding:10px 12px;border-radius:8px;min-width:240px}
+.btn{background:#111;border:1px solid #333;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px;align-items:center}
+.btn.small{font-size:12px;padding:6px 8px}
+.btn.primary{background:#0b1433;border-color:var(--accent)}
+.btn.light{background:#fff;border-color:#fff;color:#000;font-weight:800}
+.badge{padding:6px 10px;border-radius:999px;background:#111;border:1px solid #222}
+.small{font-size:12px;color:var(--muted)}
+.muted{color:var(--muted)}
+.kvmini{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:12px;color:#ddd}
+.kvmini .k{color:#aaa}
+.pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.pager a, .pager span{padding:6px 10px;border-radius:8px;border:1px solid #222;text-decoration:none;color:#fff}
+.pager .current{background:#111}
+
+.badge.plat{border-color:#2b2b2b;background:#131313}
+.badge.disc{border-color:#2b2b2b;background:#0a1b0a;color:#bdf3bd}
+
+/* modal */
+.modal-backdrop{
+  position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:20px;z-index:999;
+  background:rgba(0,0,0,.6);backdrop-filter:blur(2px);
+}
+.modal{
+  width:min(680px,96vw);background:#0f0f0f;border:1px solid var(--border);border-radius:12px;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);padding:16px;transform:translateY(6px) scale(.98);opacity:0;
+  transition:.18s ease;
+}
+.modal-backdrop[style*="display: flex"] .modal{transform:translateY(0) scale(1);opacity:1}
+.modal h3{margin:0 0 10px}
+.modal .row{margin:10px 0;color:#ddd}
+.modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:12px}
+.modal input[type="text"], .modal textarea, .modal select{
+  width:100%;background:#0b0b0b;border:1px solid var(--border);color:#fff;border-radius:8px;padding:10px 12px
+}
+.modal textarea{min-height:160px;resize:vertical}
+.modal .hint{font-size:12px;color:#aaa;margin-top:6px}
+</style>
+</head><body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <img src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="">
+      <h1>VayaRide Admin</h1>
+    </div>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/admin/drivers">Drivers</a>
+      <a href="/admin/riders">Riders</a>
+      <a href="/admin/trips">Trips</a>
+      <a href="/admin/drivers?status=pending">Pending Drivers</a>
+      <a href="/admin/drivers?status=approved">Approved Drivers</a>
+      <a href="/admin/drivers?status=rejected">Rejected Drivers</a>
+    </nav>
+    <form action="/admin/logout" method="POST" style="margin-top:12px">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+  </aside>
+
+  <main>
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <h2>Riders</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn primary" id="btn-email">Email Selected</button>
+          <button class="btn light" id="btn-wa">WhatsApp Selected</button>
+        </div>
+      </div>
+
+      <!-- Search -->
+      <form class="filter" method="GET" action="/admin/riders" id="searchForm">
+        <input class="input" type="text" name="q" id="q"
+               placeholder="Search name, email, phone, chatId, waJid, referral code, or id…"
+               value="<%= (typeof q !== 'undefined' ? q : '') %>" />
+        <select class="input" name="sort" id="sort" style="min-width:180px">
+          <option value="-createdAt" <%= (pagination?.sort||'')==='-createdAt'?'selected':'' %>>Newest first</option>
+          <option value="createdAt"  <%= (pagination?.sort||'')==='createdAt'?'selected':'' %>>Oldest first</option>
+          <option value="-trips"     <%= (pagination?.sort||'')==='-trips'?'selected':'' %>>Most trips</option>
+          <option value="-credit"    <%= (pagination?.sort||'')==='-credit'?'selected':'' %>>Highest credit</option>
+          <option value="-lastSeenAt"<%= (pagination?.sort||'')==='-lastSeenAt'?'selected':'' %>>Recently seen</option>
+        </select>
+        <input type="hidden" name="page" value="1"/>
+        <button class="btn" type="submit">Search</button>
+        <% if (pagination) { %>
+          <span class="muted">Page <%= pagination.page %> / <%= pagination.totalPages %> • <%= pagination.total %> results</span>
+        <% } %>
+      </form>
+
+      <table class="table">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="sel-all"/></th>
+            <th>Name</th>
+            <th>Contacts</th>
+            <th>Trips / Credit</th>
+            <th>Platform</th>
+            <th>Last Seen</th>
+            <th>Last Location</th>
+            <th>Referral</th>
+            <th>Joined</th>
+            <th>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% if (!riders || riders.length === 0) { %>
+            <tr><td colspan="10" class="muted">No riders found.</td></tr>
+          <% } %>
+          <% (riders || []).forEach(r => {
+               const joined = new Date(r.createdAt);
+               const seen = r.lastSeenAt ? new Date(r.lastSeenAt) : null;
+               const loc = r.lastLocation && typeof r.lastLocation.lat === 'number' && typeof r.lastLocation.lng === 'number' ? r.lastLocation : null;
+               const map = loc ? `https://maps.google.com/?q=${loc.lat},${loc.lng}` : '';
+               const discActive = r.nextDiscountPct > 0 && (!r.nextDiscountExpiresAt || new Date() < new Date(r.nextDiscountExpiresAt));
+               const clicks = r?.referralStats?.clicks || 0;
+               const regs   = r?.referralStats?.registrations || 0;
+               const lastSharedAt = r?.referralStats?.lastSharedAt ? new Date(r.referralStats.lastSharedAt) : null;
+          %>
+            <tr>
+              <td><input type="checkbox" class="sel" value="<%= r._id %>" /></td>
+              <td>
+                <div><b><%= r.name || '—' %></b></div>
+                <div class="small muted">ID: <%= r._id %></div>
+                <% if (discActive) { %>
+                  <div class="badge disc small" title="Next discount available">
+                    Discount: <%= Math.round((r.nextDiscountPct||0)*100) %>% 
+                    <% if (r.nextDiscountExpiresAt) { %>• until <%= new Date(r.nextDiscountExpiresAt).toLocaleDateString() %><% } %>
+                  </div>
+                <% } %>
+              </td>
+
+              <td>
+                <div class="kvmini">
+                  <span class="k">Email:</span><span><%= r.email || '—' %></span>
+                  <span class="k">Phone:</span><span><%= r.phone || r.msisdn || '—' %></span>
+                  <span class="k">Telegram:</span><span><%= Number.isFinite(Number(r.chatId)) ? r.chatId : '—' %></span>
+                  <span class="k">WA JID:</span><span><%= r.waJid || '—' %></span>
+                </div>
+              </td>
+
+              <td>
+                <div><b><%= Number(r.trips||0) %></b> trips</div>
+                <div class="small">credit: R<%= Number(r.credit||0).toFixed(0) %></div>
+              </td>
+
+              <td>
+                <span class="badge plat"><%= r.platform || '—' %></span>
+              </td>
+
+              <td>
+                <div><%= seen ? seen.toLocaleString() : '—' %></div>
+                <% if (r.lastLocation?.ts) { %>
+                  <div class="small muted">loc at <%= new Date(r.lastLocation.ts).toLocaleTimeString() %></div>
+                <% } %>
+              </td>
+
+              <td>
+                <% if (loc) { %>
+                  <div class="kvmini">
+                    <span class="k">Lat:</span><span><%= Number(loc.lat).toFixed(6) %></span>
+                    <span class="k">Lng:</span><span><%= Number(loc.lng).toFixed(6) %></span>
+                    <span class="k">Map:</span><span><a href="<%= map %>" target="_blank" rel="noopener">Open</a></span>
+                  </div>
+                <% } else { %>
+                  <span class="muted">—</span>
+                <% } %>
+              </td>
+
+              <td>
+                <% if (r.referralCode) { %>
+                  <div class="kvmini">
+                    <span class="k">Code:</span><span><b><%= r.referralCode %></b></span>
+                    <span class="k">Clicks:</span><span><%= clicks %></span>
+                    <span class="k">Regs:</span><span><%= regs %></span>
+                    <span class="k">Last:</span><span><%= lastSharedAt ? lastSharedAt.toLocaleString() : '—' %></span>
+                    <span class="k">Link:</span>
+                    <span class="small"><%= publicUrl %>/i/r/<%= encodeURIComponent(r.referralCode) %></span>
+                  </div>
+                <% } else { %>
+                  <em class="muted">No code</em>
+                <% } %>
+              </td>
+
+              <td><%= joined.toLocaleString() %></td>
+              <td><a class="btn small" href="/admin/riders/<%= r._id %>">Open</a></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+
+      <% if (pagination) { %>
+      <div class="pager">
+        <% const mk = (p)=>`/admin/riders?q=${encodeURIComponent(q||'')}&page=${p}&limit=${pagination.limit}&sort=${encodeURIComponent(pagination.sort||'-createdAt')}` %>
+        <% if (pagination.page > 1) { %>
+          <a href="<%= mk(1) %>">« First</a>
+          <a href="<%= mk(pagination.page-1) %>">‹ Prev</a>
+        <% } else { %>
+          <span>« First</span><span>‹ Prev</span>
+        <% } %>
+
+        <span class="current">Page <%= pagination.page %> / <%= pagination.totalPages %></span>
+
+        <% if (pagination.page < pagination.totalPages) { %>
+          <a href="<%= mk(pagination.page+1) %>">Next ›</a>
+          <a href="<%= mk(pagination.totalPages) %>">Last »</a>
+        <% } else { %>
+          <span>Next ›</span><span>Last »</span>
+        <% } %>
+      </div>
+      <% } %>
+    </section>
+  </main>
+</div>
+
+<!-- Email modal -->
+<div class="modal-backdrop" id="email-bd">
+  <div class="modal">
+    <h3>Email Riders</h3>
+    <div class="row">
+      <label class="small">Scope</label>
+      <select id="email-scope">
+        <option value="selected">Selected riders</option>
+        <option value="page">This page</option>
+        <option value="search">All (search filter)</option>
+      </select>
+      <div class="hint">“Selected” uses the checkboxes. “Page” uses current page. “All” uses your search filter.</div>
+    </div>
+    <div class="row">
+      <label class="small">Subject</label>
+      <input type="text" id="email-subj" placeholder="Subject"/>
+    </div>
+    <div class="row">
+      <label class="small">Quick templates</label>
+      <select id="email-tpl">
+        <option value="">— choose a template (optional) —</option>
+        <option value="thanks">🙏 Thank you for using VayaRide</option>
+        <option value="discount">💸 Discount available</option>
+        <option value="dashboard">🔐 Open your dashboard</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="small">Message</label>
+      <textarea id="email-msg" placeholder="Type your message…"></textarea>
+    </div>
+    <div class="actions">
+      <button class="btn" id="email-cancel">Cancel</button>
+      <button class="btn primary" id="email-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<!-- WhatsApp modal -->
+<div class="modal-backdrop" id="wa-bd">
+  <div class="modal">
+    <h3>Send WhatsApp to Riders</h3>
+    <div class="row">
+      <label class="small">Scope</label>
+      <select id="wa-scope">
+        <option value="selected">Selected riders</option>
+        <option value="page">This page</option>
+        <option value="search">All (search filter)</option>
+      </select>
+      <div class="hint">“Selected” uses the checkboxes. “Page” uses current page. “All” uses your search filter.</div>
+    </div>
+    <div class="row">
+      <label class="small">Quick templates</label>
+      <select id="wa-tpl">
+        <option value="">— choose a template (optional) —</option>
+        <option value="thanks">🙏 Thank you for using VayaRide</option>
+        <option value="discount">💸 Discount available</option>
+        <option value="dashboard">🔐 Open your dashboard</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="small">Message</label>
+      <textarea id="wa-msg" placeholder="Type your WhatsApp message…"></textarea>
+      <div class="hint">Sends via your connected WhatsApp bot.</div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="wa-cancel">Cancel</button>
+      <button class="btn primary" id="wa-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = (s, r=document) => r.querySelector(s);
+  const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+
+  const publicUrl = '<%= publicUrl || "" %>'.replace(/\/$/, '');
+
+  // select-all
+  $('#sel-all')?.addEventListener('change', (e) => {
+    $$('.sel').forEach(cb => cb.checked = e.target.checked);
+  });
+  const collectSelectedIds = () => $$('.sel:checked').map(cb => cb.value).join(',');
+
+  // open modals
+  const emailBd = $('#email-bd');
+  const waBd = $('#wa-bd');
+  const openEmail = () => emailBd.style.display = 'flex';
+  const closeEmail = () => emailBd.style.display = 'none';
+  const openWa = () => waBd.style.display = 'flex';
+  const closeWa = () => waBd.style.display = 'none';
+
+  $('#btn-email')?.addEventListener('click', openEmail);
+  $('#btn-wa')?.addEventListener('click', openWa);
+  emailBd?.addEventListener('click', (e)=>{ if(e.target===emailBd) closeEmail(); });
+  waBd?.addEventListener('click', (e)=>{ if(e.target===waBd) closeWa(); });
+  $('#email-cancel')?.addEventListener('click', closeEmail);
+  $('#wa-cancel')?.addEventListener('click', closeWa);
+
+  // templates
+  const emailTpl = $('#email-tpl');
+  const emailMsg = $('#email-msg');
+  const emailSubj = $('#email-subj');
+  const waTpl = $('#wa-tpl');
+  const waMsg = $('#wa-msg');
+
+  function setEmailTemplate(v){
+    if (v==='thanks'){
+      emailSubj.value = 'Thank you for riding with VayaRide';
+      emailMsg.value =
+`Hi there 👋
+
+Thank you for using *VayaRide*! We appreciate you.
+If you need anything, reply to this email or visit your rider dashboard:
+
+${publicUrl}/rider-dashboard.html
+
+Safe travels!`;
+    } else if (v==='discount'){
+      emailSubj.value = 'A discount is waiting for you 🎁';
+      emailMsg.value =
+`Good news!
+
+There’s a discount available on your next ride.
+Open your rider dashboard to see details:
+
+${publicUrl}/rider-dashboard.html
+
+See you soon!`;
+    } else if (v==='dashboard'){
+      emailSubj.value = 'Access your VayaRide dashboard';
+      emailMsg.value =
+`Quick access to your dashboard:
+
+${publicUrl}/rider-dashboard.html
+
+From there, you can track rides and manage your account.`;
+    }
+  }
+  function setWaTemplate(v){
+    if (v==='thanks'){
+      waMsg.value =
+`🙏 Thank you for using VayaRide!
+
+Need anything? Open your dashboard:
+${publicUrl}/rider-dashboard.html`;
+    } else if (v==='discount'){
+      waMsg.value =
+`💸 A discount is available on your next trip!
+
+Open your dashboard for details:
+${publicUrl}/rider-dashboard.html`;
+    } else if (v==='dashboard'){
+      waMsg.value =
+`🔐 Open your rider dashboard:
+${publicUrl}/rider-dashboard.html`;
+    }
+  }
+
+  emailTpl?.addEventListener('change', ()=> setEmailTemplate(emailTpl.value));
+  waTpl?.addEventListener('change', ()=> setWaTemplate(waTpl.value));
+
+  // send email
+  $('#email-send')?.addEventListener('click', async ()=>{
+    const scope = $('#email-scope').value || 'selected';
+    const subject = (emailSubj.value||'').trim();
+    const message = (emailMsg.value||'').trim();
+    if (!subject) return alert('Subject required');
+    if (!message) return alert('Message required');
+
+    const params = new URLSearchParams(location.search);
+    const payload = {
+      mode: scope,
+      subject,
+      message,
+      selectedIds: collectSelectedIds(),
+      q: $('#q')?.value || '',
+      sort: $('#sort')?.value || '',
+      page: (params.get('page') || '1'),
+      limit: (params.get('limit') || '20')
+    };
+
+    try{
+      const r = await fetch('/admin/riders/email', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if (r.redirected) { location.href = r.url; return; }
+      alert('Email sent (or queued).');
+      closeEmail();
+    }catch(e){
+      alert('Failed to send email: '+(e?.message||e));
+    }
+  });
+
+  // send WA
+  $('#wa-send')?.addEventListener('click', async ()=>{
+    const scope = $('#wa-scope').value || 'selected';
+    const message = (waMsg.value||'').trim();
+    if (!message) return alert('Type a message');
+
+    const params = new URLSearchParams(location.search);
+    const payload = {
+      mode: scope,
+      message,
+      selectedIds: collectSelectedIds(),
+      q: $('#q')?.value || '',
+      sort: $('#sort')?.value || '',
+      page: (params.get('page') || '1'),
+      limit: (params.get('limit') || '20')
+    };
+
+    try{
+      const r = await fetch('/admin/riders/wa', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error||'Failed');
+      alert(`WhatsApp sent to ${data.sent} rider(s).${data.failed ? ' Failed: '+data.failed : ''}`);
+      closeWa();
+    }catch(e){
+      alert('Failed to send WhatsApp: '+(e?.message||e));
+    }
+  });
+</script>
+</body></html>

@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title><%= title %> • VayaRide</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" type="image/png" href="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png">
+  <meta name="theme-color" content="#000000">
+  <style>
+    :root{
+      --bg:#000; --text:#fff; --muted:#cfcfcf; --border:#1d1d1d;
+      --card:#0b0b0b; --card-2:#0e0e0e; --whatsapp:#25D366;
+      --overlay:#000; --error:#ff7070; --radius:16px;
+      --good:#1db954; --accent:#ffd000;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+
+    /* ===== Header ===== */
+    .site-header{position:sticky;top:0;z-index:100;background:rgba(0,0,0,.9);backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+    .header-row{display:grid;grid-template-columns:auto 1fr auto;align-items:center;min-height:64px;gap:12px;padding:0 clamp(16px,3vw,32px)}
+    .brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit}
+    .brand .logo{width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,.9);object-fit:cover}
+    .brand .name{font-weight:800;font-size:18px}
+    .brand .tag{font-size:11px;opacity:.8;letter-spacing:.14em;text-transform:uppercase}
+    .desktop-nav{display:flex;justify-content:flex-end;align-items:center;gap:10px}
+    .ghost-btn,.btn{padding:10px 14px;border-radius:12px;font-weight:800;border:1px solid #333;background:transparent;color:#fff;cursor:pointer;text-decoration:none}
+    .btn.whatsapp{background:var(--whatsapp);border-color:var(--whatsapp);color:#021}
+    .btn.driver{background:#fff;border-color:#fff;color:#000}
+    .hamburger{display:none;width:40px;height:36px;border:1px solid #333;border-radius:10px;background:#0f0f0f;cursor:pointer;align-items:center;justify-content:center}
+    .hamburger span{display:block;width:20px;height:2px;background:#fff;position:relative}
+    .hamburger span::before,.hamburger span::after{content:"";position:absolute;left:0;width:20px;height:2px;background:#fff}
+    .hamburger span::before{top:-6px}.hamburger span::after{top:6px}
+    @media (max-width: 768px){
+      .desktop-nav{display:none}
+      .hamburger{display:flex}
+      .brand .name{font-size:16px}.brand .tag{display:none}
+    }
+
+    /* ===== Fullscreen Mobile Menu (Hides background) ===== */
+    .mobile-sheet{
+      position:fixed; inset:0; z-index:950;
+      background:var(--overlay); display:none;
+    }
+    .mobile-sheet.open{ display:flex; }
+    .mobile-inner{ margin:auto; width:min(92vw, 420px); display:flex; flex-direction:column; align-items:center; gap:14px; }
+    .m-item{ display:block; width:100%; text-align:center; padding:14px 20px; border-radius:12px; border:1px solid #2a2a2a; background:#171717; color:#fff; text-decoration:none; font-size:16px; }
+    .m-item.primary{background:var(--whatsapp);color:#021;font-weight:800;border-color:var(--whatsapp)}
+    .m-item.secondary{background:#fff;color:#000;font-weight:800;border-color:#fff}
+    .mobile-close{ position:absolute; top:18px; right:18px; width:42px; height:42px; border-radius:12px; border:1px solid #333; background:#111; color:#fff; font-size:22px; cursor:pointer; }
+
+    /* ===== Main / Hero ===== */
+    .wrap{max-width:1080px;margin:0 auto;text-align:center;padding:2rem 1rem}
+    .tagline{display:inline-block;margin:4px 0 8px;font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:#d7d7d7}
+    h1{margin:6px 0;font-weight:850;font-size:clamp(22px,4vw,36px)}
+    .lead{max-width:760px;margin:8px auto 0;opacity:.92;font-size:clamp(14px,2.2vw,18px);line-height:1.55}
+    .video-card{margin:18px auto 10px;border:1px solid var(--border);border-radius:16px;background:var(--card);padding:clamp(10px,1.4vw,14px)}
+    .frame{position:relative;overflow:hidden;border-radius:14px;background:#000;border:1px solid var(--border);aspect-ratio:16/9}
+    .frame video{width:100%;height:100%;display:block;object-fit:cover}
+    .caption{margin-top:10px;color:#cfcfcf;font-size:13px}
+    .links{margin-top:18px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+    @media(max-width:540px){.links{flex-direction:column;align-items:stretch}.btn{width:100%}}
+
+    /* ===== Footer ===== */
+    .site-footer{border-top:1px solid var(--border);padding:16px 0 22px;margin-top:32px;text-align:center}
+    .site-footer a{color:#fff;text-decoration:underline}
+
+    /* ===== Modals ===== */
+    .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:24px;z-index:100000}
+    .modal[open]{display:flex}
+    .modal .backdrop{position:absolute;inset:0;background:rgba(0,0,0,.8)}
+    .modal .dialog{position:relative;width:100%;max-width:min(760px,96vw);background:#121212;color:#fff;border:1px solid #1f1f1f;border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.65);outline:none}
+    .dialog .hd{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid #1f1f1f}
+    .dialog h2{margin:0;font-size:22px}
+    .dialog .x{background:#1a1a1a;color:#fff;border:1px solid #333;width:36px;height:36px;border-radius:10px;cursor:pointer;font-size:18px;line-height:0}
+    .dialog .bd{text-align:left;padding:16px 20px 8px;font-size:15px;color:#e9e9e9}
+    .dialog .ft{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;padding:14px 20px 18px;border-top:1px solid #1f1f1f}
+    .badge{display:inline-flex;align-items:center;gap:6px;background:#181818;border:1px solid #333;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800;letter-spacing:.2px}
+    .badge .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+    .promo-grid{display:grid;grid-template-columns:1fr;gap:14px}
+    @media(min-width:640px){.promo-grid{grid-template-columns:1fr 1fr}}
+    .promo-card{border:1px solid #232323;background:#0f0f0f;border-radius:14px;padding:14px}
+    .promo-card h3{margin:0 0 4px;font-size:18px}
+    .promo-card p{margin:0;font-size:14px;color:#ddd}
+    .promo-cta{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+    .small{color:#bdbdbd;font-size:12px;line-height:1.5}
+  </style>
+</head>
+<body>
+
+  <!-- ===== HEADER ===== -->
+  <header class="site-header">
+    <div class="header-row">
+      <a class="brand" href="/">
+        <img class="logo" src="https://res.cloudinary.com/darf17drw/image/upload/v1752064092/Untitled_design_2_wilxrl.png" alt="VayaRide">
+        <div>
+          <div class="name">VayaRide</div>
+          <div class="tag">Move Smarter</div>
+        </div>
+      </a>
+      <div></div>
+      <nav class="desktop-nav" aria-label="Primary">
+        <button class="ghost-btn" type="button" data-open-modal="#about-modal">About</button>
+        <button class="ghost-btn" type="button" data-open-modal="#feedback-modal">Feedback</button>
+        <button class="ghost-btn" type="button" data-open-modal="#share-modal">Share</button>
+        <!-- Optional: open promo from header -->
+        <button class="ghost-btn" type="button" data-open-modal="#promo-modal">Promo</button>
+        <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">Book on WhatsApp</a>
+        <a class="btn driver" href="/driver/register">Become a Driver</a>
+      </nav>
+      <button class="hamburger" id="btn-open-nav" aria-label="Open menu" aria-expanded="false">
+        <span></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===== FULLSCREEN MOBILE MENU ===== -->
+  <div class="mobile-sheet" id="mobile-sheet" aria-hidden="true">
+    <button class="mobile-close" id="btn-close-nav" aria-label="Close menu">×</button>
+    <div class="mobile-inner" role="menu">
+      <a class="m-item" href="#" data-open-modal="#about-modal">About</a>
+      <a class="m-item" href="#" data-open-modal="#feedback-modal">Feedback</a>
+      <a class="m-item" href="#" data-open-modal="#share-modal">Share</a>
+      <a class="m-item" href="#" data-open-modal="#promo-modal">🔥 Promo</a>
+      <a class="m-item primary" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">Book on WhatsApp</a>
+      <a class="m-item secondary" href="/driver/register">Become a Driver</a>
+      <a class="m-item" href="mailto:admin@vayaride.co.za">admin@vayaride.co.za</a>
+    </div>
+  </div>
+
+  <!-- ===== MAIN ===== -->
+  <div class="wrap">
+    <span class="tagline">NO APP NEEDED</span>
+    <h1>Ride in minutes on WhatsApp</h1>
+    <p class="lead">Drivers apply and riders ride — securely, simply, and fast on WhatsApp. Share your location, confirm, and go.</p>
+
+    <div class="video-card" aria-label="VayaRide preview video">
+      <div class="frame">
+        <video src="/video.mp4" autoplay muted loop playsinline preload="metadata">
+          <source src="/video.mp4" type="video/mp4" />
+        </video>
+      </div>
+      <div class="caption">A quick look at VayaRide in motion.</div>
+    </div>
+
+    <div class="links" role="group" aria-label="Primary actions">
+      <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">📱 Book on WhatsApp</a>
+      <a class="btn driver" href="/driver/register">🚗 Become a Driver</a>
+      <button class="ghost-btn" data-open-modal="#about-modal">ℹ️ How it works</button>
+      <button class="ghost-btn" data-open-modal="#promo-modal">🎉 Promo Details</button>
+    </div>
+  </div>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="site-footer">
+    © <span id="year"></span> VayaRide. All rights reserved. &nbsp;
+    <a href="mailto:admin@vayaride.co.za">admin@vayaride.co.za</a>
+  </footer>
+
+  <!-- ===== About Modal ===== -->
+  <div class="modal" id="about-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" aria-describedby="about-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="about-title">About VayaRide</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="about-desc">
+        <p class="badge"><span class="dot"></span> Trusted & Secure</p>
+        <p><strong>VayaRide is redefining how South Africa moves.</strong></p>
+        <p>Seamlessly integrated with <strong>WhatsApp</strong>, our smart platform lets you request a ride in seconds — no downloads, no forms, just natural conversation. Get matched with verified drivers, track live, and pay with confidence.</p>
+        <ul>
+          <li><strong>Professional drivers first:</strong> connect riders with verified, highly-rated drivers.</li>
+          <li><strong>Safety by design:</strong> live status, transparent pricing, and ratings for every trip.</li>
+          <li><strong>Frictionless booking:</strong> share your location or type the address; AI handles the details.</li>
+          <li><strong>Pay your way:</strong> Cash or card (PayFast).</li>
+        </ul>
+        <p><strong>Questions?</strong> Email us at <a href="mailto:admin@vayaride.co.za">admin@vayaride.co.za</a>.</p>
+      </div>
+      <div class="ft">
+        <button class="ghost-btn" type="button" data-dismiss>Close</button>
+        <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">Open WhatsApp</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Feedback / Ratings Modal ===== -->
+  <div class="modal" id="feedback-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="fb-title" aria-describedby="fb-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="fb-title">Add your view</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="fb-desc">
+        <p><strong>Do you like the product?</strong></p>
+        <div class="vote-row" role="group" aria-label="Product sentiment">
+          <button class="vote ok" type="button" id="fb-up" aria-pressed="false" aria-label="I like it">
+            👍 <span class="count" id="cnt-up">0</span>
+          </button>
+          <button class="vote no" type="button" id="fb-down" aria-pressed="false" aria-label="Not yet">
+            👎 <span class="count" id="cnt-down">0</span>
+          </button>
+        </div>
+        <div class="stat" id="fb-stat">Total votes: 0 — 👍 0 | 👎 0</div>
+        <hr style="border:0;border-top:1px solid #1f1f1f; margin:14px 0" />
+        <div class="row">
+          <div class="field">
+            <label for="fb-name">Your name</label>
+            <input id="fb-name" type="text" placeholder="e.g., Thandi" autocomplete="name" />
+          </div>
+          <div class="field">
+            <label for="fb-contact">Email or phone</label>
+            <input id="fb-contact" type="text" placeholder="e.g., thandi@example.com or +27 82 123 4567" autocomplete="email" />
+          </div>
+        </div>
+        <div class="error" id="fb-err">Please enter your name and a valid email or phone number.</div>
+        <label for="fb-text" style="margin-top:10px;"><strong>Leave a comment (optional)</strong></label>
+        <textarea id="fb-text" class="feedback" placeholder="What should we improve or keep doing?"></textarea>
+        <small class="hint">During <strong>BETA</strong>, feedback is stored locally on your device unless you connect an account.</small>
+      </div>
+      <div class="ft">
+        <button class="ghost-btn" type="button" data-dismiss>Close</button>
+        <button class="btn driver" type="button" id="fb-send">Send feedback</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Share Modal ===== -->
+  <div class="modal" id="share-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="share-title" aria-describedby="share-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="share-title">Share VayaRide</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="share-desc">
+        <div class="share-grid">
+          <div class="url-row" style="display:flex;gap:10px;align-items:center;">
+            <input id="share-url" type="text" readonly style="flex:1;background:#0f0f0f;color:#fff;border:1px solid #2a2a2a;border-radius:12px;padding:12px" />
+            <button class="ghost-btn" id="btn-copy" type="button" title="Copy link">Copy</button>
+          </div>
+          <button class="btn driver" id="btn-native-share" type="button">Share with a friend</button>
+          <div class="qr-wrap" style="display:flex;justify-content:center;margin-top:8px">
+            <img id="qr-img" alt="QR code to open this site" width="220" height="220" style="border-radius:12px;border:1px solid #1f1f1f;background:#fff"/>
+          </div>
+          <small class="hint">Scan this QR with your phone camera to open the site.</small>
+        </div>
+      </div>
+      <div class="ft">
+        <button class="ghost-btn" type="button" data-dismiss>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Promo (Marketing) Modal — NEW ===== -->
+  <div class="modal" id="promo-modal" aria-hidden="true">
+    <div class="backdrop" data-dismiss></div>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="promo-title" aria-describedby="promo-desc" tabindex="-1">
+      <div class="hd">
+        <h2 id="promo-title">🎉 Launch Promo</h2>
+        <button class="x" type="button" title="Close" aria-label="Close" data-dismiss>×</button>
+      </div>
+      <div class="bd" id="promo-desc">
+        <p class="badge"><span class="dot"></span> Limited-time offer</p>
+
+        <div class="promo-grid" style="margin-top:8px">
+          <div class="promo-card">
+            <h3>For Riders</h3>
+            <p><strong>Your next trip is FREE.</strong> Book on WhatsApp and we’ll cover it — just ride and enjoy.</p>
+          </div>
+          <div class="promo-card">
+            <h3>For Drivers</h3>
+            <p><strong>Get paid 200% on your first completed trip</strong> when you <em>upload your documents</em> after the trip. Boost your earnings from day one.</p>
+          </div>
+        </div>
+
+        <p class="small" style="margin-top:10px">
+          * Limited-time. Standard verification required. One free trip per rider. Driver 200% applies to the first completed trip only and is processed after document review. Abuse voids promo. T&Cs apply.
+        </p>
+      </div>
+      <div class="ft promo-cta">
+        <a class="btn whatsapp" href="https://wa.me/27750348047?text=Hi%20VayaRide%2C%20I%20want%20to%20book%20a%20ride" target="_blank" rel="noopener">Book Free Trip</a>
+        <a class="btn driver" href="/driver/register">Earn 200% — Become a Driver</a>
+        <button class="ghost-btn" type="button" data-dismiss>Remind me later</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite">Thanks for your feedback! 🙏</div>
+
+  <script>
+    // Footer Year
+    document.getElementById('year').textContent = new Date().getFullYear();
+
+    // Video autoplay fallback
+    (function(){
+      const v = document.querySelector('video');
+      if (!v) return;
+      const p = v.play && v.play();
+      if (p && typeof p.then === 'function'){ p.catch(()=>{ v.controls = true; }); }
+      else { v.controls = true; }
+    })();
+
+    // ===== Mobile Menu (HIDE BACKGROUND) =====
+    (function(){
+      const openBtn = document.getElementById('btn-open-nav');
+      const closeBtn = document.getElementById('btn-close-nav');
+      const sheet = document.getElementById('mobile-sheet');
+
+      function openMenu(){
+        sheet.classList.add('open');
+        sheet.setAttribute('aria-hidden','false');
+        openBtn.setAttribute('aria-expanded','true');
+        document.body.style.overflow = 'hidden';
+      }
+      function closeMenu(){
+        sheet.classList.remove('open');
+        sheet.setAttribute('aria-hidden','true');
+        openBtn.setAttribute('aria-expanded','false');
+        document.body.style.overflow = '';
+      }
+      openBtn.addEventListener('click', openMenu);
+      closeBtn.addEventListener('click', closeMenu);
+      sheet.addEventListener('click', (e)=>{ if (e.target === sheet) closeMenu(); });
+      document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeMenu(); });
+
+      // Mobile items that open modals: close menu first, then open modal
+      sheet.addEventListener('click', (e)=>{
+        const t = e.target.closest('[data-open-modal]');
+        if (t){
+          e.preventDefault();
+          const sel = t.getAttribute('data-open-modal');
+          closeMenu();
+          const modal = document.querySelector(sel);
+          if (modal) openModal(modal);
+        }
+      });
+    })();
+
+    // ===== Modal Manager (global open/close) =====
+    (function(){
+      function getFocusable(container){
+        return Array.from(container.querySelectorAll(
+          'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        ));
+      }
+      window.openModal = function(modal){
+        if (!modal) return;
+        const dialog = modal.querySelector('.dialog');
+        modal.setAttribute('open','');
+        modal.setAttribute('aria-hidden','false');
+        document.body.style.overflow = 'hidden';
+        setTimeout(()=> dialog?.focus(), 0);
+
+        function onKeydown(e){
+          if (e.key === 'Escape'){ e.preventDefault(); closeModal(modal); }
+          if (e.key === 'Tab'){
+            const f = getFocusable(dialog).filter(el => el.offsetParent !== null);
+            if (!f.length) return;
+            const first = f[0], last = f[f.length-1];
+            if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+          }
+        }
+        function onBackdrop(e){
+          if (e.target.classList.contains('backdrop') || e.target.dataset.dismiss !== undefined) closeModal(modal);
+        }
+        modal._onKeydown = onKeydown;
+        modal._onBackdrop = onBackdrop;
+        document.addEventListener('keydown', onKeydown);
+        modal.addEventListener('click', onBackdrop);
+        modal.dispatchEvent(new CustomEvent('modal:open'));
+      }
+
+      function closeModal(modal){
+        if (!modal) return;
+        document.removeEventListener('keydown', modal._onKeydown);
+        modal.removeEventListener('click', modal._onBackdrop);
+        modal.removeAttribute('open');
+        modal.setAttribute('aria-hidden','true');
+        document.body.style.overflow = '';
+      }
+      window.closeModal = closeModal;
+
+      // Any element with data-open-modal (desktop/main buttons)
+      document.addEventListener('click', (e)=>{
+        const btn = e.target.closest('[data-open-modal]');
+        if (!btn) return;
+        e.preventDefault();
+        const sel = btn.getAttribute('data-open-modal');
+        const modal = document.querySelector(sel);
+        if (modal) openModal(modal);
+      });
+
+      // Dismiss buttons in each modal
+      document.querySelectorAll('[data-dismiss]').forEach(el=>{
+        el.addEventListener('click', ()=>{
+          const modal = el.closest('.modal');
+          closeModal(modal);
+        });
+      });
+    })();
+
+    // ===== Feedback (ratings) localStorage =====
+    (function(){
+      const upBtn = document.getElementById('fb-up');
+      const downBtn = document.getElementById('fb-down');
+      const cntUp = document.getElementById('cnt-up');
+      const cntDown = document.getElementById('cnt-down');
+      const stat = document.getElementById('fb-stat');
+      const nameEl = document.getElementById('fb-name');
+      const contactEl = document.getElementById('fb-contact');
+      const err = document.getElementById('fb-err');
+      const txt = document.getElementById('fb-text');
+      const send = document.getElementById('fb-send');
+      const KEY = 'vr_feedback';
+
+      function load(){ try{ return JSON.parse(localStorage.getItem(KEY)) || { up:0, down:0, comments:[], lastVote:null }; }catch{ return { up:0, down:0, comments:[], lastVote:null }; } }
+      function save(d){ try{ localStorage.setItem(KEY, JSON.stringify(d)); }catch{} }
+      function render(){
+        const d = load();
+        if (cntUp) cntUp.textContent = d.up;
+        if (cntDown) cntDown.textContent = d.down;
+        if (stat) stat.textContent = `Total votes: ${d.up + d.down} — 👍 ${d.up} | 👎 ${d.down}`;
+        upBtn?.setAttribute('aria-pressed', d.lastVote === 'up' ? 'true' : 'false');
+        downBtn?.setAttribute('aria-pressed', d.lastVote === 'down' ? 'true' : 'false');
+      }
+      function validContact(v){
+        const s = (v||'').trim();
+        if (!s) return false;
+        const isEmail = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(s);
+        const isPhone = /^\+?\d[\d\s()-]{5,}$/.test(s);
+        return isEmail || isPhone;
+      }
+      upBtn?.addEventListener('click', ()=>{ const d = load(); if (d.lastVote === 'up') return render(); if (d.lastVote === 'down') d.down = Math.max(0, d.down - 1); d.up += 1; d.lastVote='up'; save(d); render(); });
+      downBtn?.addEventListener('click', ()=>{ const d = load(); if (d.lastVote === 'down') return render(); if (d.lastVote === 'up') d.up = Math.max(0, d.up - 1); d.down += 1; d.lastVote='down'; save(d); render(); });
+      send?.addEventListener('click', ()=>{
+        const name = (nameEl?.value||'').trim();
+        const contact = (contactEl?.value||'').trim();
+        const comment = (txt?.value||'').trim();
+        if (!name || !validContact(contact)){
+          if (err) err.style.display = 'block';
+          [nameEl, contactEl].forEach(el=>{
+            if (!el) return;
+            el.style.borderColor = (!el.value || (el===contactEl && !validContact(contact))) ? 'var(--error)' : '#2a2a2a';
+          });
+          return;
+        }
+        if (err) err.style.display = 'none';
+        [nameEl, contactEl].forEach(el=>{ if (el) el.style.borderColor = '#2a2a2a'; });
+        const d = load();
+        d.comments.push({ t: Date.now(), name, contact, msg: comment });
+        save(d); render();
+        if (nameEl) nameEl.value=''; if (contactEl) contactEl.value=''; if (txt) txt.value='';
+        const modal = document.getElementById('feedback-modal'); window.closeModal(modal);
+        const t = document.getElementById('toast'); if (t){ t.textContent='Thanks for your feedback! 🙏'; t.classList.add('show'); setTimeout(()=> t.classList.remove('show'), 2000); }
+      });
+      render();
+    })();
+
+    // ===== Share modal helpers =====
+    (function(){
+      const modal = document.getElementById('share-modal');
+      const urlInput = document.getElementById('share-url');
+      const btnCopy = document.getElementById('btn-copy');
+      const btnNative = document.getElementById('btn-native-share');
+      const qrImg = document.getElementById('qr-img');
+
+      function canonicalUrl(){
+        const base = (window.__PUBLIC_URL__ || '').replace(/\/$/, '');
+        const path = window.location.pathname || '/';
+        return base ? (base + path) : window.location.href;
+      }
+      function setQRFor(){
+        const publicBase = (window.__PUBLIC_URL__ || '').replace(/\/$/, '');
+        const herePath = window.location.pathname || '/';
+        const q = publicBase ? herePath : window.location.href;
+        const param = /^https?:\/\//i.test(q) ? q : (q.startsWith('/') ? q : '/');
+        if (qrImg) qrImg.src = '/qr.png?u=' + encodeURIComponent(param);
+      }
+
+      modal?.addEventListener('modal:open', ()=>{
+        if (urlInput) urlInput.value = canonicalUrl();
+        setQRFor();
+      });
+
+      btnCopy?.addEventListener('click', async ()=>{
+        try{ await navigator.clipboard.writeText(urlInput.value); }catch{
+          urlInput.select(); document.execCommand('copy');
+        }
+        const t = document.getElementById('toast'); if (t){ t.textContent='Link copied!'; t.classList.add('show'); setTimeout(()=> t.classList.remove('show'), 1800); }
+      });
+
+      btnNative?.addEventListener('click', async ()=>{
+        const u = urlInput?.value || window.location.href;
+        if (navigator.share){
+          try{ await navigator.share({ title: 'VayaRide — Book fast on WhatsApp', text: 'Try VayaRide with me:', url: u }); }catch{}
+        } else {
+          const t = document.getElementById('toast'); if (t){ t.textContent='Sharing not supported — copy the link or scan the QR.'; t.classList.add('show'); setTimeout(()=> t.classList.remove('show'), 2200); }
+        }
+      });
+    })();
+
+    // ===== Auto-open Promo Modal (once per day) =====
+    (function(){
+      const KEY = 'vr_promo_seen_at';
+      const DAY = 24 * 60 * 60 * 1000;
+      const last = parseInt(localStorage.getItem(KEY) || '0', 10);
+      const now = Date.now();
+      const modal = document.getElementById('promo-modal');
+
+      function shouldOpen(){ return !last || (now - last) > DAY; }
+
+      if (modal && shouldOpen()){
+        // slight delay so header settles
+        setTimeout(()=>{ openModal(modal); localStorage.setItem(KEY, String(Date.now())); }, 800);
+      }
+
+      // When user closes promo manually, persist as seen
+      modal?.addEventListener('click', (e)=>{
+        if (e.target.matches('[data-dismiss], .x')) localStorage.setItem(KEY, String(Date.now()));
+      });
+    })();
+  </script>
+</body>
+</html>
