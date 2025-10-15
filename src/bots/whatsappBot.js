@@ -151,6 +151,33 @@ function _shouldSendOnce(jid, text) {
   return true;
 }
 
+/* ---------- SEND QUEUE (buffers while connecting) ---------- */
+const _pendingSends = []; // [{ jid, text }]
+let _flushing = false;
+
+function _enqueueSend(jid, text) {
+  _pendingSends.push({ jid, text: String(text ?? '').trim() || ' ' });
+  logger.warn('WA send queued: not ready yet (jid=%s)', jid);
+}
+
+async function _flushQueuedSends() {
+  if (_flushing) return;
+  _flushing = true;
+  try {
+    while (_pendingSends.length && isSocketOpen()) {
+      const { jid, text } = _pendingSends.shift();
+      try {
+        await sock.sendMessage(jid, { text });
+        await delay(120);
+      } catch (e) {
+        logger.warn('WA queued send failed (drop): %s', e?.message || e);
+      }
+    }
+  } finally {
+    _flushing = false;
+  }
+}
+
 /* ---------- Ready-state gate (prevents send before login) ---------- */
 let readyResolve = null;
 let readyPromise = null;
@@ -168,18 +195,13 @@ function hasUser() {
 export function isWhatsAppConnected() { return isSocketOpen() && hasUser(); }
 export function getConnectionStatus() { return connState; }
 
-// IMPORTANT: return boolean, do not throw (stabilizes flow during reconnects)
-async function waitUntilReady(timeoutMs = 60000) {
-  if (isSocketOpen()) return true;
-  try {
-    await Promise.race([
-      readyPromise,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs))
-    ]);
-  } catch {
-    // swallow; we'll check socket state below
-  }
-  return isSocketOpen();
+async function waitUntilReady(timeoutMs = 15000) {
+  if (isWhatsAppConnected()) return true;
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('WhatsApp not connected yet')), timeoutMs));
+  await Promise.race([readyPromise, timeout]).catch(() => {
+    // If still not ready, return false so caller can queue
+  });
+  return isWhatsAppConnected();
 }
 
 /* ---------- send helpers ---------- */
@@ -190,14 +212,19 @@ async function sendText(jid, text) {
   }
 
   const ready = await waitUntilReady(60000);
-  if (!ready) {
-    logger.warn('WA send skipped: not connected yet (jid=%s)', jid);
-    return; // quietly skip instead of throwing during reconnect
+  if (!ready || !isSocketOpen()) {
+    _enqueueSend(jid, text);
+    return;
   }
 
   if (!_shouldSendOnce(jid, text)) return;
   const msg = (String(text ?? '').trim() || ' ');
-  return sock.sendMessage(jid, { text: msg });
+  try {
+    return await sock.sendMessage(jid, { text: msg });
+  } catch (e) {
+    logger.warn('WA send immediate failed, enqueueing: %s', e?.message || e);
+    _enqueueSend(jid, msg);
+  }
 }
 
 // Public: send by phone or jid (used by admin routes)
@@ -206,7 +233,10 @@ export async function sendWhatsAppTo(recipient, text) {
   if (!jid) throw new Error('Invalid phone/JID');
   try {
     const ready = await waitUntilReady(60000);
-    if (!ready) throw new Error('WhatsApp not connected yet');
+    if (!ready || !isSocketOpen()) {
+      _enqueueSend(jid, text);
+      return { ok: true, queued: true, jid };
+    }
     const msg = (String(text ?? '').trim() || ' ');
     await sock.sendMessage(jid, { text: msg });
     return { ok: true, jid };
@@ -450,6 +480,9 @@ async function setupClient() {
           readyResolve(true);
           readyResolve = null;
         }
+
+        // 🔁 flush anything we queued while connecting
+        try { await _flushQueuedSends(); } catch {}
       }
 
       if (connection === 'close') {
@@ -520,10 +553,7 @@ async function setupClient() {
           await handleTextMessage(jid, text);
         } catch (e) {
           console.error('WA handle error:', e);
-          // Only attempt to notify the user if we’re actually connected
-          if (isSocketOpen()) {
-            try { await sendText(m.key.remoteJid, 'Sorry, something went wrong. Try again.'); } catch {}
-          }
+          try { await sendText(m.key.remoteJid, 'Sorry, something went wrong. Try again.'); } catch {}
         }
       }
     });
@@ -732,6 +762,24 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
+  // Driver sub-menu actions
+  if (state.stage === 'driver_menu') {
+    if (txt === '1' || txt === 'no' || txt === 'not registered') {
+      await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
+      resetFlow(jid);
+      await sendMainMenu(jid);
+      return;
+    }
+    if (txt === '2' || txt === 'yes' || txt === 'i am registered') {
+      await sendText(jid, `🔐 *Driver Dashboard / Status*\nLog in here:\n${PUBLIC_URL}/driver`);
+      resetFlow(jid);
+      await sendMainMenu(jid);
+      return;
+    }
+    await sendText(jid, `Please reply with *1* (register) or *2* (dashboard).`);
+    return;
+  }
+
   // PICKUP selection by number
   if (state.stage === 'await_pickup' && /^\d{1,2}$/.test(txt) && Array.isArray(state.suggestions) && state.suggestions.length) {
     const idx = Number(txt) - 1;
@@ -858,7 +906,7 @@ async function handleTextMessage(jid, raw) {
       `Choose payment:\n` +
       `1) 💵 Cash\n` +
       `2) 💳 Card (PayFast)\n` +
-      `Reply with *1* or *2*.`;
+      `Reply with *1* or *2*.`; // do not dedupe if same text quickly
 
     await sendText(jid, summary);
     return;
