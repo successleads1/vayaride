@@ -49,7 +49,7 @@ const SUPPORT_EMAIL = (process.env.SUPPORT_EMAIL || 'admin@vayaride.co.za').trim
 /* ---------- ZA-only parameters ---------- */
 const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || 'country:za';
 const GMAPS_LANGUAGE = process.env.GOOGLE_MAPS_LANGUAGE || 'en-ZA';
-const GMAPS_REGION = process.env.GOOGLE_MAPS_REGION || 'za';
+const GMAPS_REGION   = process.env.GOOGLE_MAPS_REGION || 'za';
 const ZA_CENTER = { lat: -28.4793, lng: 24.6727 };
 const ZA_RADIUS_M = 1_500_000;
 
@@ -71,6 +71,16 @@ function normalizePhone(raw) {
 function phoneFromJid(jid) {
   const core = String(jid || '').split('@')[0];
   return normalizePhone(core);
+}
+
+function toJid(recipient) {
+  // Accept +2782..., 2782..., "2782@s.whatsapp.net", or waJid already
+  if (!recipient) return null;
+  const s = String(recipient).trim();
+  if (s.includes('@s.whatsapp.net')) return s;
+  const phone = normalizePhone(s);
+  if (!phone) return null;
+  return `${phone.replace('+', '')}@s.whatsapp.net`;
 }
 
 /* --------------- state --------------- */
@@ -141,10 +151,78 @@ function _shouldSendOnce(jid, text) {
   return true;
 }
 
+/* ---------- Ready-state gate (prevents send before login) ---------- */
+let readyResolve = null;
+let readyPromise = null;
+function resetReadyPromise() {
+  readyPromise = new Promise((res) => (readyResolve = res));
+}
+resetReadyPromise();
+
+function isSocketOpen() {
+  return !!(sock && sock.ws && sock.ws.readyState === 1);
+}
+function hasUser() {
+  return !!(sock && sock.user && sock.user.id);
+}
+export function isWhatsAppConnected() { return isSocketOpen() && hasUser(); }
+export function getConnectionStatus() { return connState; }
+
+// IMPORTANT: return boolean, do not throw (stabilizes flow during reconnects)
+async function waitUntilReady(timeoutMs = 60000) {
+  if (isSocketOpen()) return true;
+  try {
+    await Promise.race([
+      readyPromise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs))
+    ]);
+  } catch {
+    // swallow; we'll check socket state below
+  }
+  return isSocketOpen();
+}
+
+/* ---------- send helpers ---------- */
 async function sendText(jid, text) {
-  if (!sock) throw new Error('WA client not ready');
+  if (!sock) {
+    logger.warn('WA send skipped: client not initialized');
+    return;
+  }
+
+  const ready = await waitUntilReady(60000);
+  if (!ready) {
+    logger.warn('WA send skipped: not connected yet (jid=%s)', jid);
+    return; // quietly skip instead of throwing during reconnect
+  }
+
   if (!_shouldSendOnce(jid, text)) return;
-  await sock.sendMessage(jid, { text });
+  const msg = (String(text ?? '').trim() || ' ');
+  return sock.sendMessage(jid, { text: msg });
+}
+
+// Public: send by phone or jid (used by admin routes)
+export async function sendWhatsAppTo(recipient, text) {
+  const jid = toJid(recipient);
+  if (!jid) throw new Error('Invalid phone/JID');
+  try {
+    const ready = await waitUntilReady(60000);
+    if (!ready) throw new Error('WhatsApp not connected yet');
+    const msg = (String(text ?? '').trim() || ' ');
+    await sock.sendMessage(jid, { text: msg });
+    return { ok: true, jid };
+  } catch (err) {
+    const code = err?.output?.statusCode ?? err?.status ?? err?.code ?? 'ERR';
+    const reason = err?.data?.reason || err?.message || String(err);
+    console.error(`WA send failed → ${jid}: [${code}] ${reason}`);
+    const friendly = !isSocketOpen()
+      ? 'WhatsApp session not connected. Open /qrcode and scan, then try again.'
+      : !hasUser()
+      ? 'WhatsApp not logged in yet. Wait for connection to show "connected".'
+      : reason;
+    const e = new Error(friendly);
+    e.code = code;
+    throw e;
+  }
 }
 
 function generatePIN() { return Math.floor(1000 + Math.random() * 9000).toString(); }
@@ -366,6 +444,12 @@ async function setupClient() {
         currentQR = null;
         connState = 'connected';
         console.log('✅ WhatsApp connected');
+
+        // resolve readiness when user is known
+        if (hasUser() && readyResolve) {
+          readyResolve(true);
+          readyResolve = null;
+        }
       }
 
       if (connection === 'close') {
@@ -380,6 +464,9 @@ async function setupClient() {
           code === DisconnectReason.loggedOut || code === 401 || reason === '401' || reason === 'logged_out';
         const badSession =
           code === DisconnectReason.badSession || reason === 'bad_session';
+
+        // re-arm readiness so senders wait for reconnection
+        resetReadyPromise();
 
         if (isLoggedOut || badSession) {
           console.log('❌ Logged out / bad session. Clearing creds and restarting…');
@@ -398,7 +485,7 @@ async function setupClient() {
 
     // inbound messages
     sock.ev.on('messages.upsert', async ({ messages }) => {
-      for (const m of messages || []) {
+      for (const m of (messages || [])) {
         try {
           const fromMe = m.key?.fromMe;
           const jid = m.key?.remoteJid;
@@ -424,7 +511,7 @@ async function setupClient() {
           text = (text || '').trim();
           if (!loc && !text) continue;
 
-          // 👇 capture referral code from *first* inbound texts
+          // capture referral code from first inbound texts
           const maybeCode = parseReferralFromText(text);
           if (maybeCode) pendingRefByJid.set(jid, maybeCode);
 
@@ -433,7 +520,10 @@ async function setupClient() {
           await handleTextMessage(jid, text);
         } catch (e) {
           console.error('WA handle error:', e);
-          try { await sendText(m.key.remoteJid, 'Sorry, something went wrong. Try again.'); } catch {}
+          // Only attempt to notify the user if we’re actually connected
+          if (isSocketOpen()) {
+            try { await sendText(m.key.remoteJid, 'Sorry, something went wrong. Try again.'); } catch {}
+          }
         }
       }
     });
@@ -458,7 +548,7 @@ async function handleTextMessage(jid, raw) {
   const hasName = !!(rider?.name || waNames.get(jid));
   const hasEmail = !!rider?.email;
 
-  /* --- If phone is missing, ask once & hold flow until saved (except during name/email steps) --- */
+  // If phone is missing, ask once (except during name/email steps)
   if (state.stage !== 'reg_name' && state.stage !== 'reg_email') {
     const ensured = await ensurePhonePresence({ jid, rider, state });
     if (ensured === 'prompted') return;
@@ -477,7 +567,7 @@ async function handleTextMessage(jid, raw) {
       { upsert: true }
     );
     const prev = (convo.get(jid) || {})._returnTo || 'idle';
-    convo.set(jid, { stage: prev }); // resume previous stage
+    convo.set(jid, { stage: prev });
     await sendText(jid, `✅ Saved your number: ${phone}`);
     if (prev === 'idle') await sendMainMenu(jid);
     return;
@@ -527,7 +617,7 @@ async function handleTextMessage(jid, raw) {
       { upsert: true }
     );
 
-    // ✅ apply referral reward if pending
+    // apply referral reward if pending
     try {
       const fresh = await Rider.findOne({ waJid: jid }).select('_id').lean();
       const pending = pendingRefByJid.get(jid);
@@ -640,24 +730,6 @@ async function handleTextMessage(jid, raw) {
       );
       return;
     }
-  }
-
-  // Driver sub-menu actions
-  if (state.stage === 'driver_menu') {
-    if (txt === '1' || txt === 'no' || txt === 'not registered') {
-      await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
-      resetFlow(jid);
-      await sendMainMenu(jid);
-      return;
-    }
-    if (txt === '2' || txt === 'yes' || txt === 'i am registered') {
-      await sendText(jid, `🔐 *Driver Dashboard / Status*\nLog in here:\n${PUBLIC_URL}/driver`);
-      resetFlow(jid);
-      await sendMainMenu(jid);
-      return;
-    }
-    await sendText(jid, `Please reply with *1* (register) or *2* (dashboard).`);
-    return;
   }
 
   // PICKUP selection by number
@@ -1014,12 +1086,11 @@ export function initWhatsappBot() {
     console.log('WhatsApp Bot already initialized');
     return;
   }
+  // fresh sends should wait for connection
+  resetReadyPromise();
   console.log('🚀 Initializing WhatsApp Bot...');
   setupClient();
 }
-
-export function isWhatsAppConnected() { return !!(sock && sock.ws && sock.ws.readyState === 1); }
-export function getConnectionStatus() { return connState; }
 
 export async function waitForQrDataUrl(timeoutMs = 25000) {
   if (currentQR) return qrcode.toDataURL(currentQR);
@@ -1029,7 +1100,10 @@ export async function waitForQrDataUrl(timeoutMs = 25000) {
   });
 }
 
-export async function sendWhatsAppMessage(jid, text) { return sendText(jid, text); }
+// kept for backward compatibility with your admin routes:
+export async function sendWhatsAppMessage(recipient, text) {
+  return sendWhatsAppTo(recipient, text);
+}
 
 export async function resetWhatsAppSession() {
   try {
@@ -1042,6 +1116,7 @@ export async function resetWhatsAppSession() {
     currentQR = null;
     connState = 'disconnected';
   } finally {
+    resetReadyPromise();
     setupClient();
   }
 }
