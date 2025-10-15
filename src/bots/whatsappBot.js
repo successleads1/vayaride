@@ -151,7 +151,7 @@ function _shouldSendOnce(jid, text) {
   return true;
 }
 
-/* ---------- Ready-state gate (prevents send before login) ---------- */
+/* ---------- Ready-state gate (prevents send before login), FIXED ---------- */
 let readyResolve = null;
 let readyPromise = null;
 function resetReadyPromise() {
@@ -169,17 +169,19 @@ export function isWhatsAppConnected() { return isSocketOpen() && hasUser(); }
 export function getConnectionStatus() { return connState; }
 
 async function waitUntilReady(timeoutMs = 15000) {
-  if (isWhatsAppConnected()) return true;
+  if (isWhatsAppConnected() || isSocketOpen()) return true;
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('WhatsApp not connected yet')), timeoutMs));
   await Promise.race([readyPromise, timeout]);
-  if (!isWhatsAppConnected()) throw new Error('WhatsApp not connected yet');
+  if (!isSocketOpen()) throw new Error('WhatsApp not connected yet');
   return true;
 }
 
-/* ---------- send helpers ---------- */
+/* ---------- send helpers (do not block when socket is already open) ---------- */
 async function sendText(jid, text) {
   if (!sock) throw new Error('WA client not initialized');
-  await waitUntilReady(); // <-- key: block until connected & logged in
+  if (!isSocketOpen()) {
+    await waitUntilReady();
+  }
   if (!_shouldSendOnce(jid, text)) return;
   const msg = (String(text ?? '').trim() || ' ');
   return sock.sendMessage(jid, { text: msg });
@@ -190,7 +192,7 @@ export async function sendWhatsAppTo(recipient, text) {
   const jid = toJid(recipient);
   if (!jid) throw new Error('Invalid phone/JID');
   try {
-    await waitUntilReady();
+    if (!isSocketOpen()) await waitUntilReady();
     const msg = (String(text ?? '').trim() || ' ');
     await sock.sendMessage(jid, { text: msg });
     return { ok: true, jid };
@@ -380,6 +382,8 @@ async function triggerSupportEmail({ jid, rider, context = 'WhatsApp support men
 }
 
 /* --------------- WA setup --------------- */
+const waEvents = new EventEmitter();
+
 async function setupClient() {
   if (initializing) return;
   initializing = true;
@@ -406,7 +410,14 @@ async function setupClient() {
       syncFullHistory: false
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    // creds.update: persist creds AND resolve readiness once me.id is known
+    sock.ev.on('creds.update', (creds) => {
+      try { saveCreds(creds); } catch {}
+      if (creds?.me?.id && readyResolve) {
+        readyResolve(true);
+        readyResolve = null;
+      }
+    });
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -428,9 +439,8 @@ async function setupClient() {
         currentQR = null;
         connState = 'connected';
         console.log('✅ WhatsApp connected');
-
-        // resolve readiness when user is known
-        if (hasUser() && readyResolve) {
+        // ✅ Resolve readiness immediately on open (don't wait for sock.user)
+        if (readyResolve) {
           readyResolve(true);
           readyResolve = null;
         }
@@ -444,13 +454,13 @@ async function setupClient() {
 
         connState = 'disconnected';
 
+        // re-arm readiness so senders wait for reconnection
+        resetReadyPromise();
+
         const isLoggedOut =
           code === DisconnectReason.loggedOut || code === 401 || reason === '401' || reason === 'logged_out';
         const badSession =
           code === DisconnectReason.badSession || reason === 'bad_session';
-
-        // re-arm readiness so senders wait for reconnection
-        resetReadyPromise();
 
         if (isLoggedOut || badSession) {
           console.log('❌ Logged out / bad session. Clearing creds and restarting…');
@@ -515,8 +525,6 @@ async function setupClient() {
     initializing = false;
   }
 }
-
-const waEvents = new EventEmitter();
 
 /* --------------- message handlers --------------- */
 async function handleTextMessage(jid, raw) {
@@ -864,7 +872,7 @@ async function handleTextMessage(jid, raw) {
   }
 
   // Payment select
-  if (state.stage === 'await_payment') {
+  if (state.stage === 'await_payment')) {
     if (txt === '1' || txt === 'cash') {
       const ride = await Ride.findById(state.rideId);
       if (!ride) { resetFlow(jid); await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.'); return; }
