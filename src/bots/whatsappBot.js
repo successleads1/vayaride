@@ -73,6 +73,17 @@ function phoneFromJid(jid) {
   return normalizePhone(core);
 }
 
+// 👇 helpers for tolerant WA targets
+function isJid(str) {
+  return /@(s\.whatsapp\.net|g\.us|broadcast)$/.test(String(str || ''));
+}
+function jidFromPhone(phoneLike) {
+  const norm = normalizePhone(phoneLike);
+  if (!norm) return null;
+  const digits = norm.replace(/[^\d]/g, '');
+  return `${digits}@s.whatsapp.net`;
+}
+
 /* --------------- state --------------- */
 let sock = null;
 let initializing = false;
@@ -145,6 +156,14 @@ async function sendText(jid, text) {
   if (!sock) throw new Error('WA client not ready');
   if (!_shouldSendOnce(jid, text)) return;
   await sock.sendMessage(jid, { text });
+}
+
+// ✅ Public tolerant sender for Admin use (JID or phone)
+export async function sendWhatsAppTo(target, text) {
+  if (!sock) throw new Error('WA client not ready');
+  const jid = isJid(target) ? String(target) : jidFromPhone(target);
+  if (!jid) throw new Error('Invalid JID/phone for WhatsApp');
+  return sendText(jid, text);
 }
 
 function generatePIN() { return Math.floor(1000 + Math.random() * 9000).toString(); }

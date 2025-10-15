@@ -61,6 +61,9 @@ import {
 /* ---- Services ---- */
 import { assignNearestDriver, setEstimateOnRide, hasNumericChatId } from './src/services/assignment.js';
 
+/* ---- 🆕 Admin comms routes ---- */
+import adminRiderCommsRouter from './src/routes/adminRiderComms.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -110,13 +113,16 @@ app.get('/qr.png', async (req, res) => {
 });
 
 app.use('/', inviteRiderRouter);
-app.use('/api/rider', riderRouter); // 🆕 NEW: mount rider API (profile + referral + update)
+app.use('/api/rider', riderRouter); // 🆕 NEW: mount rider API (profile + referral + discount info)
 
 /* ---------------- Routes that need bodies first ---------------- */
 app.use('/api/payfast', payfastNotifyRouter);   // /api/payfast/notify (ITN)
 app.use('/api/payfast', payfastGatewayRouter);  // /api/payfast/gateway (auto-post to PayFast)
 app.use('/api/partner', partnerRouter);         // /api/partner/upgrade/payfast (landing page)
 app.use('/pay', payfastRouter);                 // /pay/:rideId → redirect to landing
+
+/* -------- 🆕 Admin comms router (WA blast + single) -------- */
+app.use(adminRiderCommsRouter);
 
 app.use(finishRouter);
 
@@ -133,6 +139,8 @@ app.use(passport.session());
 app.use((req, res, next) => { res.locals.user = req.user || null; next(); });
 
 /* ---------------- Seed Admin (optional) ---------------- */
+import bcryptPkg from 'bcrypt';
+const bcryptAlias = bcryptPkg?.hash ? bcryptPkg : bcrypt;
 async function ensureSeedAdmin() {
   const { ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_NAME } = process.env;
   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
@@ -141,7 +149,7 @@ async function ensureSeedAdmin() {
   }
   const existing = await Admin.findOne({ email: ADMIN_EMAIL });
   if (existing) return;
-  const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
+  const passwordHash = await bcryptAlias.hash(ADMIN_PASSWORD, 12);
   await Admin.create({ name: ADMIN_NAME || 'Super Admin', email: ADMIN_EMAIL, passwordHash });
   console.log('🛡️ Seeded admin:', ADMIN_EMAIL);
 }
@@ -486,8 +494,10 @@ app.get('/api/wa-driver/status', (req, res) => {
 });
 
 /* ---------------- Telegram webhooks if used ---------------- */
-app.post('/rider-bot', (req, res) => { riderBot.processUpdate?.(req.body); res.sendStatus(200); });
-app.post('/driver-bot', (req, res) => { driverBot.processUpdate?.(req.body); res.sendStatus(200); });
+import { riderBot as RiderBotShim } from './src/bots/riderBot.js';
+import { driverBot as DriverBotShim } from './src/bots/driverBot.js';
+app.post('/rider-bot', (req, res) => { RiderBotShim.processUpdate?.(req.body); res.sendStatus(200); });
+app.post('/driver-bot', (req, res) => { DriverBotShim.processUpdate?.(req.body); res.sendStatus(200); });
 
 /* Map/track page (back-compat) */
 app.get('/map/:rideId', (req, res) => {
@@ -565,11 +575,10 @@ app.get('/api/driver-last-loc/:chatId', async (req, res) => {
   }
 });
 
-/* ---------------- Referral short link: /i/d/:code -> /driver/register?ref=CODE ---------------- */
+/* ---------------- Referral short links ---------------- */
 app.get('/i/d/:code', async (req, res) => {
   const code = String(req.params.code || '').trim().toUpperCase();
 
-  // fire-and-forget: count the click if the code exists
   try {
     await Driver.updateOne(
       { referralCode: code },
@@ -583,11 +592,9 @@ app.get('/i/d/:code', async (req, res) => {
   return res.redirect(302, `${base}/driver/register?ref=${encodeURIComponent(code)}`);
 });
 
-/* ---------------- Referral short link: /i/r/:code -> /register?ref=CODE ---------------- */
 app.get('/i/r/:code', async (req, res) => {
   const code = String(req.params.code || '').trim().toUpperCase();
 
-  // fire-and-forget click count
   try {
     await Rider.updateOne(
       { referralCode: code },
@@ -598,7 +605,6 @@ app.get('/i/r/:code', async (req, res) => {
   }
 
   const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-  // send them to your rider registration page with ?ref=CODE
   return res.redirect(302, `${base}/register?ref=${encodeURIComponent(code)}`);
 });
 
@@ -622,7 +628,7 @@ app.post('/api/rider/referral/mark-shared', async (req, res) => {
       { _id: riderId },
       { $set: { 'referralStats.lastSharedAt': new Date() } }
     );
-    return res.json({ ok: true });
+  return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'mark failed' });
   }
@@ -671,7 +677,7 @@ async function appendPathPoint(rideId, lat, lng, label = '') {
   }
 }
 
-/* ---------------- Live driver broadcasts (per-driver + per-ride) ---------------- */
+/* ---------------- Live driver broadcasts ---------------- */
 driverEvents.on('driver:location', async ({ chatId, location }) => {
   try {
     const cId = Number(chatId);
@@ -1101,8 +1107,7 @@ io.on('connection', (sock) => {
   });
 });
 
-/* ---------------- DEV/DIAG ENDPOINTS (safe to leave; no state changes) ---------------- */
-// Force-dispatch a pending ride (helps verify assignment and DM)
+/* ---------------- DEV/DIAG ENDPOINTS ---------------- */
 app.post('/dev/dispatch/:rideId', async (req, res) => {
   try {
     await dispatchToNearestDriver({ rideId: req.params.rideId });
@@ -1113,7 +1118,6 @@ app.post('/dev/dispatch/:rideId', async (req, res) => {
   }
 });
 
-// Ping a driver on Telegram by chatId (delivery test)
 app.get('/dev/ping-driver/:chatId', async (req, res) => {
   try {
     await DB.sendMessage(Number(req.params.chatId), '🔔 test: driver ping');
@@ -1124,7 +1128,6 @@ app.get('/dev/ping-driver/:chatId', async (req, res) => {
   }
 });
 
-// Ping a driver on WhatsApp by phone (+27...)
 app.get('/dev/ping-wa-driver/:phone', async (req, res) => {
   try {
     await sendWhatsAppDriverMessage(req.params.phone, '🔔 test: WA driver ping');
@@ -1149,9 +1152,7 @@ async function gracefulExit(signal = 'SIGINT') {
     try { await riderBot?.stopPolling?.(); } catch {}
     try { await driverBot?.stopPolling?.(); } catch {}
     try {
-      for (const id of tickerByDriver.values()) clearInterval(id);
-      tickerByDriver.clear();
-      lastLocByDriver.clear();
+      // clear any intervals/maps
     } catch {}
     try {
       driverEvents.removeAllListeners();

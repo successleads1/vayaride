@@ -208,7 +208,10 @@ h2{margin:0 0 10px;font-size:18px}
               </td>
 
               <td><%= joined.toLocaleString() %></td>
-              <td><a class="btn small" href="/admin/riders/<%= r._id %>">Open</a></td>
+              <td>
+                <a class="btn small" href="/admin/riders/<%= r._id %>">Open</a>
+                <button class="btn small" data-wa-one="<%= r._id %>" data-rname="<%= r.name || '' %>">WA</button>
+              </td>
             </tr>
           <% }) %>
         </tbody>
@@ -275,7 +278,7 @@ h2{margin:0 0 10px;font-size:18px}
   </div>
 </div>
 
-<!-- WhatsApp modal -->
+<!-- WhatsApp modal (bulk) -->
 <div class="modal-backdrop" id="wa-bd">
   <div class="modal">
     <h3>Send WhatsApp to Riders</h3>
@@ -288,23 +291,75 @@ h2{margin:0 0 10px;font-size:18px}
       </select>
       <div class="hint">“Selected” uses the checkboxes. “Page” uses current page. “All” uses your search filter.</div>
     </div>
+
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <label class="small">Discount % (optional)</label>
+        <input type="text" id="wa-disc-pct" placeholder="e.g. 20" />
+      </div>
+      <div>
+        <label class="small">Expires in (days, optional)</label>
+        <input type="text" id="wa-disc-exp" placeholder="e.g. 30" />
+      </div>
+    </div>
+
     <div class="row">
       <label class="small">Quick templates</label>
       <select id="wa-tpl">
         <option value="">— choose a template (optional) —</option>
-        <option value="thanks">🙏 Thank you for using VayaRide</option>
-        <option value="discount">💸 Discount available</option>
-        <option value="dashboard">🔐 Open your dashboard</option>
+        <option value="thanks">🙏 Thank you</option>
+        <option value="discount">💸 Discount (auto)</option>
+        <option value="dashboard">🔐 Open dashboard</option>
       </select>
+      <div class="hint">“Discount (auto)” will generate a message using the % and expiry above.</div>
     </div>
+
+    <div class="row" style="display:flex;gap:8px;align-items:center">
+      <button class="btn small" id="wa-generate">Generate message</button>
+      <span class="small muted">You can still edit the text below before sending.</span>
+    </div>
+
     <div class="row">
       <label class="small">Message</label>
-      <textarea id="wa-msg" placeholder="Type your WhatsApp message…"></textarea>
+      <textarea id="wa-msg" placeholder="Type or generate a WhatsApp message…"></textarea>
       <div class="hint">Sends via your connected WhatsApp bot.</div>
     </div>
+
     <div class="actions">
       <button class="btn" id="wa-cancel">Cancel</button>
       <button class="btn primary" id="wa-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<!-- Single WA drawer -->
+<div class="modal-backdrop" id="wa-one-bd">
+  <div class="modal">
+    <h3>Message Rider</h3>
+    <div class="row">
+      <div class="small">Rider: <b id="wa-one-name"></b></div>
+    </div>
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <label class="small">Discount %</label>
+        <input type="text" id="wa-one-disc-pct" placeholder="e.g. 20" />
+      </div>
+      <div>
+        <label class="small">Expires (days)</label>
+        <input type="text" id="wa-one-disc-exp" placeholder="e.g. 30" />
+      </div>
+    </div>
+    <div class="row" style="display:flex;gap:8px;align-items:center">
+      <button class="btn small" id="wa-one-generate">Generate</button>
+      <span class="small muted">Optional — fills the text area below.</span>
+    </div>
+    <div class="row">
+      <label class="small">Message</label>
+      <textarea id="wa-one-msg" placeholder="Type or generate a WhatsApp message…"></textarea>
+    </div>
+    <div class="actions">
+      <button class="btn" id="wa-one-cancel">Cancel</button>
+      <button class="btn primary" id="wa-one-send">Send</button>
     </div>
   </div>
 </div>
@@ -321,27 +376,29 @@ h2{margin:0 0 10px;font-size:18px}
   });
   const collectSelectedIds = () => $$('.sel:checked').map(cb => cb.value).join(',');
 
-  // open modals
+  // open/close modals
   const emailBd = $('#email-bd');
   const waBd = $('#wa-bd');
+  const waOneBd = $('#wa-one-bd');
   const openEmail = () => emailBd.style.display = 'flex';
   const closeEmail = () => emailBd.style.display = 'none';
   const openWa = () => waBd.style.display = 'flex';
   const closeWa = () => waBd.style.display = 'none';
+  const openWaOne = () => waOneBd.style.display = 'flex';
+  const closeWaOne = () => waOneBd.style.display = 'none';
 
   $('#btn-email')?.addEventListener('click', openEmail);
   $('#btn-wa')?.addEventListener('click', openWa);
   emailBd?.addEventListener('click', (e)=>{ if(e.target===emailBd) closeEmail(); });
   waBd?.addEventListener('click', (e)=>{ if(e.target===waBd) closeWa(); });
+  waOneBd?.addEventListener('click', (e)=>{ if(e.target===waOneBd) closeWaOne(); });
   $('#email-cancel')?.addEventListener('click', closeEmail);
   $('#wa-cancel')?.addEventListener('click', closeWa);
 
-  // templates
+  // email templates
   const emailTpl = $('#email-tpl');
   const emailMsg = $('#email-msg');
   const emailSubj = $('#email-subj');
-  const waTpl = $('#wa-tpl');
-  const waMsg = $('#wa-msg');
 
   function setEmailTemplate(v){
     if (v==='thanks'){
@@ -349,7 +406,7 @@ h2{margin:0 0 10px;font-size:18px}
       emailMsg.value =
 `Hi there 👋
 
-Thank you for using *VayaRide*! We appreciate you.
+Thank you for using VayaRide — we appreciate you.
 If you need anything, reply to this email or visit your rider dashboard:
 
 ${publicUrl}/rider-dashboard.html
@@ -376,6 +433,28 @@ ${publicUrl}/rider-dashboard.html
 From there, you can track rides and manage your account.`;
     }
   }
+  emailTpl?.addEventListener('change', ()=> setEmailTemplate(emailTpl.value));
+
+  // -------- WhatsApp (bulk) --------
+  const waTpl  = $('#wa-tpl');
+  const waMsg  = $('#wa-msg');
+  const waPct  = $('#wa-disc-pct');
+  const waExp  = $('#wa-disc-exp');
+
+  function niceDiscountMsg(name, pct) {
+    const pctTxt = Math.round(Number(pct||0));
+    return (
+`Hey ${name||'there'} 👋
+
+Good news — there’s a *${pctTxt}%* discount on your next VayaRide trip.
+
+Open your dashboard to view and apply it:
+${publicUrl}/rider-dashboard.html
+
+Need a hand? Just reply here.`
+    );
+  }
+
   function setWaTemplate(v){
     if (v==='thanks'){
       waMsg.value =
@@ -384,22 +463,95 @@ From there, you can track rides and manage your account.`;
 Need anything? Open your dashboard:
 ${publicUrl}/rider-dashboard.html`;
     } else if (v==='discount'){
-      waMsg.value =
-`💸 A discount is available on your next trip!
-
-Open your dashboard for details:
-${publicUrl}/rider-dashboard.html`;
+      const pct = (waPct.value||'').trim() || '20';
+      waMsg.value = niceDiscountMsg('there', pct);
     } else if (v==='dashboard'){
       waMsg.value =
 `🔐 Open your rider dashboard:
 ${publicUrl}/rider-dashboard.html`;
     }
   }
-
-  emailTpl?.addEventListener('change', ()=> setEmailTemplate(emailTpl.value));
   waTpl?.addEventListener('change', ()=> setWaTemplate(waTpl.value));
+  $('#wa-generate')?.addEventListener('click', ()=> setWaTemplate($('#wa-tpl').value));
 
-  // send email
+  $('#wa-send')?.addEventListener('click', async ()=>{
+    const scope = $('#wa-scope').value || 'selected';
+    const message = (waMsg.value||'').trim();
+    const discountPct = Number(($('#wa-disc-pct').value||'').trim() || 0);
+    const discountExpireDays = Number(($('#wa-disc-exp').value||'').trim() || 0);
+    if (!message && discountPct<=0) return alert('Type a message or set a discount %');
+
+    const params = new URLSearchParams(location.search);
+    const payload = {
+      mode: scope,
+      message,
+      discountPct,
+      discountExpireDays,
+      selectedIds: collectSelectedIds(),
+      q: $('#q')?.value || '',
+      sort: $('#sort')?.value || '',
+      page: (params.get('page') || '1'),
+      limit: (params.get('limit') || '20')
+    };
+
+    try{
+      const r = await fetch('/admin/riders/wa', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error||'Failed');
+      alert(`WhatsApp sent to ${data.sent} rider(s).${data.failed ? ' Failed: '+data.failed : ''}`);
+      closeWa();
+    }catch(e){
+      alert('Failed to send WhatsApp: '+(e?.message||e));
+    }
+  });
+
+  // -------- WhatsApp (single) --------
+  let waOneTargetId = null;
+  $$( '[data-wa-one]' ).forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      waOneTargetId = btn.getAttribute('data-wa-one');
+      $('#wa-one-name').textContent = btn.getAttribute('data-rname') || '';
+      $('#wa-one-msg').value = '';
+      $('#wa-one-disc-pct').value = '';
+      $('#wa-one-disc-exp').value = '';
+      openWaOne();
+    });
+  });
+
+  $('#wa-one-cancel')?.addEventListener('click', closeWaOne);
+
+  $('#wa-one-generate')?.addEventListener('click', ()=>{
+    const pct = ($('#wa-one-disc-pct').value||'').trim() || '20';
+    $('#wa-one-msg').value = niceDiscountMsg($('#wa-one-name').textContent || 'there', pct);
+  });
+
+  $('#wa-one-send')?.addEventListener('click', async ()=>{
+    if (!waOneTargetId) return closeWaOne();
+    const message = ($('#wa-one-msg').value||'').trim();
+    const discountPct = Number(($('#wa-one-disc-pct').value||'').trim() || 0);
+    const discountExpireDays = Number(($('#wa-one-disc-exp').value||'').trim() || 0);
+    if (!message && discountPct<=0) return alert('Type a message or set a discount %');
+
+    try{
+      const r = await fetch('/admin/riders/wa/single', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ riderId: waOneTargetId, message, discountPct, discountExpireDays })
+      });
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error||'Failed');
+      alert('WhatsApp sent.');
+      closeWaOne();
+    }catch(e){
+      alert('Failed to send WhatsApp: '+(e?.message||e));
+    }
+  });
+
+  // ------- Email send -------
   $('#email-send')?.addEventListener('click', async ()=>{
     const scope = $('#email-scope').value || 'selected';
     const subject = (emailSubj.value||'').trim();
@@ -430,38 +582,6 @@ ${publicUrl}/rider-dashboard.html`;
       closeEmail();
     }catch(e){
       alert('Failed to send email: '+(e?.message||e));
-    }
-  });
-
-  // send WA
-  $('#wa-send')?.addEventListener('click', async ()=>{
-    const scope = $('#wa-scope').value || 'selected';
-    const message = (waMsg.value||'').trim();
-    if (!message) return alert('Type a message');
-
-    const params = new URLSearchParams(location.search);
-    const payload = {
-      mode: scope,
-      message,
-      selectedIds: collectSelectedIds(),
-      q: $('#q')?.value || '',
-      sort: $('#sort')?.value || '',
-      page: (params.get('page') || '1'),
-      limit: (params.get('limit') || '20')
-    };
-
-    try{
-      const r = await fetch('/admin/riders/wa', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(payload)
-      });
-      const data = await r.json();
-      if (!data.ok) throw new Error(data.error||'Failed');
-      alert(`WhatsApp sent to ${data.sent} rider(s).${data.failed ? ' Failed: '+data.failed : ''}`);
-      closeWa();
-    }catch(e){
-      alert('Failed to send WhatsApp: '+(e?.message||e));
     }
   });
 </script>
