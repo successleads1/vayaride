@@ -872,7 +872,7 @@ async function handleTextMessage(jid, raw) {
   }
 
   // Payment select
-  if (state.stage === 'await_payment')) {
+  if (state.stage === 'await_payment') {  // ← fixed (removed extra ')')
     if (txt === '1' || txt === 'cash') {
       const ride = await Ride.findById(state.rideId);
       if (!ride) { resetFlow(jid); await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.'); return; }
