@@ -15,6 +15,7 @@ package-lock.json
 
 # WhatsApp Baileys sessions (sensitive!)
 baileys_auth_info/
+baileys_auth_driver/
 
 # Builds/coverage/cache
 dist/
@@ -30,13 +31,12 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Upload/output (none expected, but safe to ignore)
+# Upload/output
 uploads/
 public/uploads/
 
 # Generated WhatsApp QR
 public/wa-qr.png
-# WhatsApp Baileys driver sessions
-baileys_auth_driver/
-*.mp4
+
+# Media
 *.mp4

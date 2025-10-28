@@ -13,7 +13,7 @@ const PointSchema = new mongoose.Schema(
 const RideSchema = new mongoose.Schema(
   {
     /* ---------- Rider identities ---------- */
-    riderChatId: Number,          // Telegram (legacy)
+    riderChatId: Number,          // Telegram (legacy/primary in your bot)
     riderWaJid: { type: String }, // WhatsApp JID
 
     /* ---------- Driver ---------- */
@@ -21,12 +21,12 @@ const RideSchema = new mongoose.Schema(
     driverChatId: { type: Number }, // quick access for bot/sockets
 
     /* ---------- Route ---------- */
-    pickup: { lat: Number, lng: Number },
-    destination: { lat: Number, lng: Number },
+    pickup: { lat: Number, lng: Number, address: String },
+    destination: { lat: Number, lng: Number, address: String },
 
     /* ---------- Quoting / vehicle ---------- */
     estimate: Number,
-    vehicleType: { type: String },
+    vehicleType: { type: String }, // 'normal' | 'comfort' | 'xl' | 'luxury'
 
     /* ✅ Promo (optional; for referral discounts, etc.) */
     promoDiscountPct:   { type: Number, default: 0 },      // e.g. 0.2 for 20%
@@ -42,9 +42,14 @@ const RideSchema = new mongoose.Schema(
     /* ---------- Lifecycle ---------- */
     status: {
       type: String,
-      enum: ['pending', 'accepted', 'enroute', 'completed', 'cancelled', 'payment_pending'],
+      enum: ['scheduled', 'pending', 'accepted', 'enroute', 'completed', 'cancelled', 'payment_pending'],
       default: 'pending'
     },
+
+    /* ---------- Scheduling (NEW) ---------- */
+    scheduledFor:        { type: Date, default: null },   // when to activate the ride
+    scheduledNote:       { type: String, default: '' },   // optional rider/admin note
+    scheduledDispatched: { type: Boolean, default: false }, // true after admin dispatch
 
     /* ---------- Cancel details (compat names) ---------- */
     cancelReason: { type: String },       // legacy name

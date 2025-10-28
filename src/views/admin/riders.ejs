@@ -42,6 +42,7 @@ h2{margin:0 0 10px;font-size:18px}
 
 .badge.plat{border-color:#2b2b2b;background:#131313}
 .badge.disc{border-color:#2b2b2b;background:#0a1b0a;color:#bdf3bd}
+.badge.up{border-color:#113e1b;background:#07150a;color:#bdf3bd}
 
 /* modal */
 .modal-backdrop{
@@ -73,8 +74,9 @@ h2{margin:0 0 10px;font-size:18px}
     <nav>
       <a href="/admin">Dashboard</a>
       <a href="/admin/drivers">Drivers</a>
-      <a href="/admin/riders">Riders</a>
+      <a href="/admin/riders"><b>Riders</b></a>
       <a href="/admin/trips">Trips</a>
+      <a href="/admin/prebook">Prebook</a>
       <a href="/admin/drivers?status=pending">Pending Drivers</a>
       <a href="/admin/drivers?status=approved">Approved Drivers</a>
       <a href="/admin/drivers?status=rejected">Rejected Drivers</a>
@@ -120,6 +122,7 @@ h2{margin:0 0 10px;font-size:18px}
             <th>Name</th>
             <th>Contacts</th>
             <th>Trips / Credit</th>
+            <th>Upcoming</th> <!-- NEW -->
             <th>Platform</th>
             <th>Last Seen</th>
             <th>Last Location</th>
@@ -130,7 +133,7 @@ h2{margin:0 0 10px;font-size:18px}
         </thead>
         <tbody>
           <% if (!riders || riders.length === 0) { %>
-            <tr><td colspan="10" class="muted">No riders found.</td></tr>
+            <tr><td colspan="11" class="muted">No riders found.</td></tr>
           <% } %>
           <% (riders || []).forEach(r => {
                const joined = new Date(r.createdAt);
@@ -141,6 +144,7 @@ h2{margin:0 0 10px;font-size:18px}
                const clicks = r?.referralStats?.clicks || 0;
                const regs   = r?.referralStats?.registrations || 0;
                const lastSharedAt = r?.referralStats?.lastSharedAt ? new Date(r.referralStats.lastSharedAt) : null;
+               const sched = (scheduledSummaryByRider && r.chatId!=null) ? scheduledSummaryByRider[String(r.chatId)] : null;
           %>
             <tr>
               <td><input type="checkbox" class="sel" value="<%= r._id %>" /></td>
@@ -149,7 +153,7 @@ h2{margin:0 0 10px;font-size:18px}
                 <div class="small muted">ID: <%= r._id %></div>
                 <% if (discActive) { %>
                   <div class="badge disc small" title="Next discount available">
-                    Discount: <%= Math.round((r.nextDiscountPct||0)*100) %>% 
+                    Discount: <%= Math.round((r.nextDiscountPct||0)*100) %>%
                     <% if (r.nextDiscountExpiresAt) { %>• until <%= new Date(r.nextDiscountExpiresAt).toLocaleDateString() %><% } %>
                   </div>
                 <% } %>
@@ -169,9 +173,21 @@ h2{margin:0 0 10px;font-size:18px}
                 <div class="small">credit: R<%= Number(r.credit||0).toFixed(0) %></div>
               </td>
 
+              <!-- NEW Upcoming column -->
               <td>
-                <span class="badge plat"><%= r.platform || '—' %></span>
+                <% if (sched && sched.count > 0) { %>
+                  <div class="badge up small">
+                    <b><%= sched.count %></b> scheduled
+                  </div>
+                  <% if (sched.next) { %>
+                    <div class="small">next: <%= new Date(sched.next).toLocaleString() %></div>
+                  <% } %>
+                <% } else { %>
+                  <span class="muted">—</span>
+                <% } %>
               </td>
+
+              <td><span class="badge plat"><%= r.platform || '—' %></span></td>
 
               <td>
                 <div><%= seen ? seen.toLocaleString() : '—' %></div>
@@ -554,8 +570,8 @@ ${publicUrl}/rider-dashboard.html`;
   // ------- Email send -------
   $('#email-send')?.addEventListener('click', async ()=>{
     const scope = $('#email-scope').value || 'selected';
-    const subject = (emailSubj.value||'').trim();
-    const message = (emailMsg.value||'').trim();
+    const subject = ($('#email-subj').value||'').trim();
+    const message = ($('#email-msg').value||'').trim();
     if (!subject) return alert('Subject required');
     if (!message) return alert('Message required');
 

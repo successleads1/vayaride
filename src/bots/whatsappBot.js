@@ -1,5 +1,18 @@
 // src/bots/whatsappBot.js
-// ✅ ESM imports for Baileys
+// WhatsApp Rider Bot (Baileys / ESM) — production-ready, matches the Telegram flow:
+// - First-time registration (name → email → phone infer/prompt)
+// - Main menu with booking/help/support/profile/driver
+// - Address entry via text (Google Places, ZA-scoped) or location share
+// - Quotes → vehicle select → payment select (Cash or PayFast) BEFORE driver assignment
+// - Secure dashboard link (token + 4-digit PIN, 10-minute expiry)
+// - Live tracking link after driver accepts; arrival/started/cancelled notifications
+// - Ratings flow (1–5) after trip completion
+// - Referral code capture on first inbound message (ref/REFCODE)
+// - Dedupe layer to prevent double sends
+// - Robust reconnect, auth purge on bad session, QR broadcasting + PNG snapshot
+// - Safe public send API (phone or JID)
+// - Defensive coding with try/catch guards throughout
+
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -20,16 +33,22 @@ import crypto from 'crypto';
 import Ride from '../models/Ride.js';
 import Rider from '../models/Rider.js';
 import Driver from '../models/Driver.js';
+
+// Events bus shared with other parts of the system (driver side, assignment, etc.)
 import { riderEvents } from './riderBot.js';
 import { driverEvents } from './driverBot.js';
+
+// Pricing / quotes (must return [{ vehicleType: 'normal'|'comfort'|'luxury'|'xl', price: number }, ...])
 import { getAvailableVehicleQuotes } from '../services/pricing.js';
+
+// Mailers (non-fatal if they fail)
 import {
   sendAdminEmailToDrivers,
   sendRiderWelcomeEmail,
   sendAdminNewRiderAlert
 } from '../services/mailer.js';
 
-/* --------------- paths / env --------------- */
+/* --------------- Paths / ENV --------------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(process.cwd());
@@ -42,11 +61,11 @@ const AUTH_DIR = process.env.WA_AUTH_DIR
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const GOOGLE_MAPS_API_KEY = (process.env.GOOGLE_MAPS_API_KEY || '').trim();
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
 const SUPPORT_EMAIL = (process.env.SUPPORT_EMAIL || 'admin@vayaride.co.za').trim();
 
-/* ---------- ZA-only parameters ---------- */
+/* ---------- ZA-only parameters / tuning ---------- */
 const GMAPS_COMPONENTS = process.env.GOOGLE_MAPS_COMPONENTS || 'country:za';
 const GMAPS_LANGUAGE = process.env.GOOGLE_MAPS_LANGUAGE || 'en-ZA';
 const GMAPS_REGION = process.env.GOOGLE_MAPS_REGION || 'za';
@@ -55,8 +74,6 @@ const ZA_RADIUS_M = 1_500_000;
 
 /* ---------- Phone normalization ---------- */
 const DEFAULT_CC = (process.env.DEFAULT_COUNTRY_CODE || '27').replace(/^\+/, ''); // e.g. "27"
-
-// Normalize various inputs to E.164 (+XXXXXXXX)
 function normalizePhone(raw) {
   if (!raw) return null;
   let s = String(raw).trim();
@@ -67,13 +84,10 @@ function normalizePhone(raw) {
   if (!/^\d{8,15}$/.test(s)) return null;
   return `+${s}`;
 }
-
 function phoneFromJid(jid) {
   const core = String(jid || '').split('@')[0];
   return normalizePhone(core);
 }
-
-// 👇 helpers for tolerant WA targets
 function isJid(str) {
   return /@(s\.whatsapp\.net|g\.us|broadcast)$/.test(String(str || ''));
 }
@@ -84,93 +98,21 @@ function jidFromPhone(phoneLike) {
   return `${digits}@s.whatsapp.net`;
 }
 
-/* --------------- state --------------- */
+/* --------------- State --------------- */
 let sock = null;
 let initializing = false;
 let currentQR = null;
 let connState = 'disconnected';
 
-const waNames = new Map(); // jid -> name
-const waRideById = new Map();
+const waNames = new Map();       // jid -> name (pre-save during reg)
+const waRideById = new Map();    // rideId -> jid (cache)
 
-// per-JID wizard state
-// booking: { stage, pickup, destination, quotes, chosenVehicle, price, rideId, suggestions, addrSession }
-// registration: { stage: 'reg_name' | 'reg_email' | 'reg_phone', temp: {name, email}, _returnTo }
-// driverMenu: { stage: 'driver_menu' }
-const convo = new Map();
+const convo = new Map();         // jid -> { stage, ... }
+const ratingAwait = new Map();   // jid -> rideId
+const pendingRefByJid = new Map(); // jid -> referral code (until registration saved)
 
-// rating-await map (jid -> rideId)
-const ratingAwait = new Map();
-
-/* --- referral: remembers pending code until registration completes --- */
-const pendingRefByJid = new Map(); // jid -> CODE
-function parseReferralFromText(t = '') {
-  const s = String(t).trim();
-  const m = /\bref(?:erral)?[\s_:=-]*([A-Z0-9]{4,12})\b/i.exec(s);
-  return m ? m[1].toUpperCase() : null;
-}
-
-/* --------------- helpers --------------- */
-const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
-
-function purgeAuthFolder() {
-  try {
-    if (!fs.existsSync(AUTH_DIR)) return;
-    for (const f of fs.readdirSync(AUTH_DIR)) {
-      fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
-    }
-    logger.warn('WA: purged auth folder');
-  } catch (e) {
-    logger.error('WA: purge error %s', e?.message || e);
-  }
-}
-
-async function saveQrPng(dataUrl) {
-  try {
-    const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
-    const file = path.join(PUBLIC_DIR, 'wa-qr.png');
-    fs.writeFileSync(file, base64, 'base64');
-  } catch (e) {
-    logger.warn('WA: failed to save wa-qr.png: %s', e?.message || e);
-  }
-}
-
-/* ---------- DEDUPE LAYER ---------- */
-const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
-const _recentSends = new Map();
-function _normalizeText(t = '') { return String(t).trim().replace(/\s+/g, ' '); }
-function _shouldSendOnce(jid, text) {
-  const key = `${jid}|${_normalizeText(text)}`;
-  const now = Date.now();
-  const last = _recentSends.get(key) || 0;
-  if (now - last < DEDUPE_TTL_MS) return false;
-  _recentSends.set(key, now);
-  if (_recentSends.size > 2000) {
-    const cutoff = now - 2 * DEDUPE_TTL_MS;
-    for (const [k, ts] of _recentSends) if (ts < cutoff) _recentSends.delete(k);
-  }
-  return true;
-}
-
-async function sendText(jid, text) {
-  if (!sock) throw new Error('WA client not ready');
-  if (!_shouldSendOnce(jid, text)) return;
-  await sock.sendMessage(jid, { text });
-}
-
-// ✅ Public tolerant sender for Admin use (JID or phone)
-export async function sendWhatsAppTo(target, text) {
-  if (!sock) throw new Error('WA client not ready');
-  const jid = isJid(target) ? String(target) : jidFromPhone(target);
-  if (!jid) throw new Error('Invalid JID/phone for WhatsApp');
-  return sendText(jid, text);
-}
-
-function generatePIN() { return Math.floor(1000 + Math.random() * 9000).toString(); }
-function generateToken() { return crypto.randomBytes(24).toString('hex'); }
+/* ---------- Regex / helpers ---------- */
 const EMAIL_RE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-
-/* ---------- Shortcut expansions ---------- */
 const ZA_SHORTCUTS = {
   uct: 'University of Cape Town',
   uwc: 'University of the Western Cape',
@@ -193,20 +135,86 @@ function boostToZA(raw = '') {
   if (q.length <= 5) return `${q} South Africa`;
   return q;
 }
+function parseReferralFromText(t = '') {
+  const s = String(t).trim();
+  const m = /\bref(?:erral)?[\s_:=-]*([A-Z0-9]{4,12})\b/i.exec(s);
+  return m ? m[1].toUpperCase() : null;
+}
 
-/* ---------- flow helpers ---------- */
+/* --------------- Logger --------------- */
+const logger = pino({ level: process.env.WA_LOG_LEVEL || 'info' });
+
+/* --------------- QR helpers --------------- */
+async function saveQrPng(dataUrl) {
+  try {
+    const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+    const file = path.join(PUBLIC_DIR, 'wa-qr.png');
+    fs.writeFileSync(file, base64, 'base64');
+  } catch (e) {
+    logger.warn('WA: failed to save wa-qr.png: %s', e?.message || e);
+  }
+}
+
+/* --------------- Auth helpers --------------- */
+function purgeAuthFolder() {
+  try {
+    if (!fs.existsSync(AUTH_DIR)) return;
+    for (const f of fs.readdirSync(AUTH_DIR)) {
+      fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
+    }
+    logger.warn('WA: purged auth folder');
+  } catch (e) {
+    logger.error('WA: purge error %s', e?.message || e);
+  }
+}
+
+/* --------------- Dedupe layer --------------- */
+const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
+const _recentSends = new Map();
+function _normalizeText(t = '') { return String(t).trim().replace(/\s+/g, ' '); }
+function _shouldSendOnce(jid, text) {
+  const key = `${jid}|${_normalizeText(text)}`;
+  const now = Date.now();
+  const last = _recentSends.get(key) || 0;
+  if (now - last < DEDUPE_TTL_MS) return false;
+  _recentSends.set(key, now);
+  if (_recentSends.size > 2000) {
+    const cutoff = now - 2 * DEDUPE_TTL_MS;
+    for (const [k, ts] of _recentSends) if (ts < cutoff) _recentSends.delete(k);
+  }
+  return true;
+}
+
+async function sendText(jid, text) {
+  if (!sock) throw new Error('WA client not ready');
+  if (!_shouldSendOnce(jid, text)) return;
+  await sock.sendMessage(jid, { text });
+}
+
+/* --------------- Public tolerant sender (Admin) --------------- */
+export async function sendWhatsAppTo(target, text) {
+  if (!sock) throw new Error('WA client not ready');
+  const jid = isJid(target) ? String(target) : jidFromPhone(target);
+  if (!jid) throw new Error('Invalid JID/phone for WhatsApp');
+  return sendText(jid, text);
+}
+
+/* --------------- Tokens / PINs --------------- */
+function generatePIN() { return Math.floor(1000 + Math.random() * 9000).toString(); }
+function generateToken() { return crypto.randomBytes(24).toString('hex'); }
+
+/* --------------- Conversation helpers --------------- */
 function resetFlow(jid) { convo.set(jid, { stage: 'idle' }); }
 function startBooking(jid) { convo.set(jid, { stage: 'await_pickup' }); }
 function startRegistration(jid) { convo.set(jid, { stage: 'reg_name', temp: {} }); }
 function startDriverMenu(jid) { convo.set(jid, { stage: 'driver_menu' }); }
 
-/* ---------- persist WA rider profile & location ---------- */
+/* --------------- Rider upsert / phone ensure --------------- */
 async function upsertWaRider(jid, { name = null, lastLocation = null } = {}) {
   const set = { lastSeenAt: new Date(), platform: 'whatsapp' };
   if (name) set.name = name;
   if (lastLocation) set.lastLocation = { ...lastLocation, ts: new Date() };
 
-  // Try to auto-set phone on first insert based on jid
   const auto = phoneFromJid(jid);
   const setOnInsert = { waJid: jid, platform: 'whatsapp' };
   if (auto) { setOnInsert.phone = auto; setOnInsert.msisdn = auto; }
@@ -218,14 +226,12 @@ async function upsertWaRider(jid, { name = null, lastLocation = null } = {}) {
   );
 }
 
-/* ---------- Ensure rider has a phone ---------- */
 async function ensurePhonePresence({ jid, rider = null, state = null } = {}) {
   try {
     const r = rider || await Rider.findOne({ waJid: jid }).lean();
     const existing = r?.phone || r?.msisdn;
     if (existing) return 'ok';
 
-    // Try to infer from JID
     const inferred = phoneFromJid(jid);
     if (inferred) {
       await Rider.findOneAndUpdate(
@@ -236,7 +242,6 @@ async function ensurePhonePresence({ jid, rider = null, state = null } = {}) {
       return 'autofilled';
     }
 
-    // Ask the user once, and stay in this stage until valid phone is provided
     const prev = state?.stage || 'idle';
     convo.set(jid, { ...(state || {}), stage: 'reg_phone', _returnTo: prev });
     await sendText(
@@ -250,7 +255,7 @@ async function ensurePhonePresence({ jid, rider = null, state = null } = {}) {
   }
 }
 
-/* ---------- Dashboard link for WA ---------- */
+/* --------------- Dashboard link (token + PIN) --------------- */
 async function sendDashboardLinkWA(jid) {
   const dashboardToken = generateToken();
   const dashboardPin = generatePIN();
@@ -266,7 +271,7 @@ async function sendDashboardLinkWA(jid) {
   await sendText(jid, `🔐 *Dashboard link:*\n${link}\n\n🔢 *Your PIN:* ${dashboardPin}\n⏱️ *Expires in 10 mins*`);
 }
 
-/* ---------- Google Places helpers (ZA) ---------- */
+/* --------------- Google Places (ZA-scoped) --------------- */
 function ensureSessionToken(state) {
   if (!state.addrSession) state.addrSession = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   return state.addrSession;
@@ -316,7 +321,7 @@ function formatSuggestionList(sugs) {
   return sugs.map((s, i) => `${i + 1}) ${s.description}`).join('\n');
 }
 
-/* ---------- support email trigger ---------- */
+/* --------------- Support email trigger --------------- */
 async function triggerSupportEmail({ jid, rider, context = 'WhatsApp support menu' }) {
   try {
     const subject = 'WhatsApp Support Request — VayaRide';
@@ -332,11 +337,13 @@ async function triggerSupportEmail({ jid, rider, context = 'WhatsApp support men
        </ul>`;
     await sendAdminEmailToDrivers(SUPPORT_EMAIL, { subject, html });
   } catch (e) {
-    console.warn('Support email trigger failed:', e?.message || e);
+    logger.warn('Support email trigger failed: %s', e?.message || e);
   }
 }
 
-/* --------------- WA setup --------------- */
+/* --------------- WA Client setup --------------- */
+const waEvents = new EventEmitter();
+
 async function setupClient() {
   if (initializing) return;
   initializing = true;
@@ -345,10 +352,8 @@ async function setupClient() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
-    console.log('🔄 Connecting to WhatsApp...');
 
     connState = 'connecting';
-
     sock = makeWASocket({
       version,
       logger,
@@ -415,7 +420,7 @@ async function setupClient() {
       }
     });
 
-    // inbound messages
+    // Inbound messages
     sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const m of messages || []) {
         try {
@@ -443,12 +448,11 @@ async function setupClient() {
           text = (text || '').trim();
           if (!loc && !text) continue;
 
-          // 👇 capture referral code from *first* inbound texts
+          // Capture referral code from early texts
           const maybeCode = parseReferralFromText(text);
           if (maybeCode) pendingRefByJid.set(jid, maybeCode);
 
           if (loc) { await handleLocationMessage(jid, loc); continue; }
-
           await handleTextMessage(jid, text);
         } catch (e) {
           console.error('WA handle error:', e);
@@ -464,26 +468,25 @@ async function setupClient() {
   }
 }
 
-const waEvents = new EventEmitter();
-
-/* --------------- message handlers --------------- */
+/* --------------- Message Handlers --------------- */
 async function handleTextMessage(jid, raw) {
   if (!raw) return;
   const txt = (raw || '').toLowerCase();
   const state = convo.get(jid) || { stage: 'idle' };
 
+  // Ensure rider record exists
   await upsertWaRider(jid).catch(() => {});
   const rider = await Rider.findOne({ waJid: jid }).lean().catch(() => null);
   const hasName = !!(rider?.name || waNames.get(jid));
   const hasEmail = !!rider?.email;
 
-  /* --- If phone is missing, ask once & hold flow until saved (except during name/email steps) --- */
+  // If not in name/email steps, ensure phone first
   if (state.stage !== 'reg_name' && state.stage !== 'reg_email') {
     const ensured = await ensurePhonePresence({ jid, rider, state });
     if (ensured === 'prompted') return;
   }
 
-  // Accept phone input when we are in reg_phone stage
+  // Accept phone in reg_phone stage
   if ((convo.get(jid)?.stage) === 'reg_phone') {
     const phone = normalizePhone(raw);
     if (!phone) {
@@ -496,13 +499,13 @@ async function handleTextMessage(jid, raw) {
       { upsert: true }
     );
     const prev = (convo.get(jid) || {})._returnTo || 'idle';
-    convo.set(jid, { stage: prev }); // resume previous stage
+    convo.set(jid, { stage: prev });
     await sendText(jid, `✅ Saved your number: ${phone}`);
     if (prev === 'idle') await sendMainMenu(jid);
     return;
   }
 
-  // Driver quick-links
+  // Quick driver links
   if (txt === '/driver' || txt === 'driver') {
     await sendText(jid, `🧑‍✈️ *Driver Status*\nCheck your status or log in to your dashboard:\n${PUBLIC_URL}/driver`);
     return;
@@ -512,14 +515,14 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // First time / greetings → registration flow
+  // First time / greetings → registration
   if ((!hasName || !hasEmail) && (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu' || state.stage === 'idle')) {
     startRegistration(jid);
     await sendText(jid, '👋 Welcome! Please enter your *full name* to register:');
     return;
   }
 
-  // Registration flow
+  // Registration: name
   if (state.stage === 'reg_name') {
     const name = raw.trim();
     if (!/^[a-z][a-z\s.'-]{1,}$/i.test(name)) {
@@ -528,10 +531,11 @@ async function handleTextMessage(jid, raw) {
     }
     waNames.set(jid, name);
     convo.set(jid, { stage: 'reg_email', temp: { name } });
-    await sendText(jid, '📧 Great! Now enter your *email address*:');
+    await sendText(jid, '📧 Great! Now enter your *email address* (e.g. name@example.com):');
     return;
   }
 
+  // Registration: email
   if (state.stage === 'reg_email') {
     const email = raw.trim();
     if (!EMAIL_RE.test(email)) {
@@ -546,7 +550,7 @@ async function handleTextMessage(jid, raw) {
       { upsert: true }
     );
 
-    // ✅ apply referral reward if pending
+    // Referral apply if pending
     try {
       const fresh = await Rider.findOne({ waJid: jid }).select('_id').lean();
       const pending = pendingRefByJid.get(jid);
@@ -573,7 +577,8 @@ async function handleTextMessage(jid, raw) {
     resetFlow(jid);
     await sendText(jid, `✅ Registration complete, ${name}!`);
 
-    try { await sendRiderWelcomeEmail(email, { name }); } catch (e) { console.warn('sendRiderWelcomeEmail failed:', e?.message || e); }
+    // Non-fatal best-effort emails
+    try { await sendRiderWelcomeEmail(email, { name }); } catch {}
     try {
       await sendAdminNewRiderAlert({
         name,
@@ -582,7 +587,7 @@ async function handleTextMessage(jid, raw) {
         createdAt: new Date(),
         dashboardUrl: `${PUBLIC_URL}/admin/riders`
       });
-    } catch (e) { console.warn('sendAdminNewRiderAlert failed:', e?.message || e); }
+    } catch {}
 
     const ensured = await ensurePhonePresence({ jid, state: convo.get(jid) });
     if (ensured === 'prompted') return;
@@ -611,14 +616,14 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Main menu shortcuts
+  // Menu aliases
   if (txt === '/start' || txt === 'start' || txt === 'hi' || txt === 'hello' || txt === 'menu') {
     resetFlow(jid);
     await sendMainMenu(jid);
     return;
   }
 
-  // Idle menu options (including driver option 5)
+  // Idle menu actions
   if ((state.stage || 'idle') === 'idle') {
     if (txt === '1' || txt === 'book' || txt === 'book trip') {
       startBooking(jid);
@@ -661,7 +666,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // Driver sub-menu actions
+  // Driver sub-menu
   if (state.stage === 'driver_menu') {
     if (txt === '1' || txt === 'no' || txt === 'not registered') {
       await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
@@ -679,7 +684,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // PICKUP selection by number
+  // PICKUP choose by number (from suggestions)
   if (state.stage === 'await_pickup' && /^\d{1,2}$/.test(txt) && Array.isArray(state.suggestions) && state.suggestions.length) {
     const idx = Number(txt) - 1;
     const choice = state.suggestions[idx];
@@ -717,7 +722,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // DESTINATION selection by number
+  // DEST choose by number
   if (state.stage === 'await_destination' && /^\d{1,2}$/.test(txt) && Array.isArray(state.suggestions) && state.suggestions.length) {
     const idx = Number(txt) - 1;
     const choice = state.suggestions[idx];
@@ -730,9 +735,7 @@ async function handleTextMessage(jid, raw) {
       state.suggestions = [];
 
       let quotes = [];
-      try {
-        quotes = await getAvailableVehicleQuotes({ pickup: state.pickup, destination: state.destination, radiusKm: 30 });
-      } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
+      try { quotes = await getAvailableVehicleQuotes({ pickup: state.pickup, destination: state.destination, radiusKm: 30 }); } catch {}
 
       if (!quotes.length) {
         state.stage = 'await_pickup';
@@ -771,7 +774,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // VEHICLE selection
+  // Vehicle select
   if (state.stage === 'await_vehicle' && /^\d{1,2}$/.test(txt)) {
     const idx = Number(txt) - 1;
     const q = state.quotes?.[idx];
@@ -785,7 +788,7 @@ async function handleTextMessage(jid, raw) {
       estimate: q.price,
       paymentMethod: 'cash',
       vehicleType: q.vehicleType,
-      status: 'payment_pending',
+      status: 'payment_pending',     // important: assign driver only after payment choice
       platform: 'whatsapp',
       riderWaJid: jid
     });
@@ -795,7 +798,11 @@ async function handleTextMessage(jid, raw) {
     state.stage = 'await_payment';
     convo.set(jid, state);
 
-    const label = q.vehicleType === 'comfort' ? 'Comfort' : q.vehicleType === 'luxury' ? 'Luxury' : q.vehicleType === 'xl' ? 'XL' : 'Normal';
+    const label =
+      q.vehicleType === 'comfort' ? 'Comfort' :
+      q.vehicleType === 'luxury'  ? 'Luxury'  :
+      q.vehicleType === 'xl'      ? 'XL'      : 'Normal';
+
     const summary =
       `🧾 *Trip Summary*\n` +
       `• Vehicle: ${label}\n` +
@@ -811,15 +818,16 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Payment select
+  // Payment choice
   if (state.stage === 'await_payment') {
     if (txt === '1' || txt === 'cash') {
       const ride = await Ride.findById(state.rideId);
       if (!ride) { resetFlow(jid); await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.'); return; }
       ride.paymentMethod = 'cash';
-      ride.status = 'pending';
+      ride.status = 'pending'; // driver can now be assigned
       await ride.save();
 
+      // Emit to assignment flow (driver will get accept/ignore, nearest first)
       riderEvents.emit('booking:new', { rideId: String(ride._id), vehicleType: state.chosenVehicle });
 
       await sendText(jid, '✅ Cash selected. Requesting the nearest driver for you…');
@@ -840,9 +848,11 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  if (state.stage === 'await_pickup') { await sendText(jid, `📍 Please send your *pickup* — share location (📎) or type the address for suggestions.`); return; }
+  // Hints if user is stuck
+  if (state.stage === 'await_pickup')  { await sendText(jid, `📍 Please send your *pickup* — share location (📎) or type the address for suggestions.`); return; }
   if (state.stage === 'await_destination') { await sendText(jid, `📍 Please send your *destination* — share location (📎) or type the address for suggestions.`); return; }
 
+  // Fallback to menu
   if ((convo.get(jid)?.stage || 'idle') === 'idle') {
     await sendMainMenu(jid);
   }
@@ -854,7 +864,6 @@ async function handleLocationMessage(jid, locationMessage) {
 
   await upsertWaRider(jid, { lastLocation: { lat, lng } }).catch(() => {});
 
-  // Ensure phone before proceeding with booking by location
   const state = convo.get(jid) || { stage: 'idle' };
   const ensured = await ensurePhonePresence({ jid, state });
   if (ensured === 'prompted') return;
@@ -875,9 +884,7 @@ async function handleLocationMessage(jid, locationMessage) {
     state.suggestions = [];
 
     let quotes = [];
-    try {
-      quotes = await getAvailableVehicleQuotes({ pickup: state.pickup, destination: state.destination, radiusKm: 30 });
-    } catch (e) { console.error('getAvailableVehicleQuotes failed:', e); }
+    try { quotes = await getAvailableVehicleQuotes({ pickup: state.pickup, destination: state.destination, radiusKm: 30 }); } catch {}
 
     if (!quotes.length) {
       state.stage = 'await_pickup';
@@ -897,7 +904,7 @@ async function handleLocationMessage(jid, locationMessage) {
   }
 }
 
-/* --------- helpers for vehicle labels to rider --------- */
+/* --------------- Driver → Rider notifications --------------- */
 function vtLabel(t) {
   if (t === 'comfort') return 'Comfort';
   if (t === 'luxury')  return 'Luxury';
@@ -916,7 +923,6 @@ function carPretty(driver) {
 }
 const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
 
-/* --------------- Driver → WA rider notifications --------------- */
 driverEvents.on('ride:accepted', async ({ rideId }) => {
   const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
@@ -982,7 +988,7 @@ driverEvents.on('ride:cancelled', async ({ ride }) => {
   try { await sendText(jid, '❌ The driver cancelled the trip. Please try booking again.'); } catch {}
 });
 
-/* ------------ rideId resolver ------------ */
+/* --------------- Resolve WA JID by rideId --------------- */
 async function getWaJidForRideId(rideId) {
   const cached = waRideById.get(String(rideId));
   if (cached) return cached;
@@ -992,7 +998,7 @@ async function getWaJidForRideId(rideId) {
   } catch { return null; }
 }
 
-/* ------------ rating: public notifier (EXPORT) ------------ */
+/* --------------- Public rating notifier --------------- */
 export async function notifyWhatsAppRiderToRate(rideOrId) {
   try {
     let ride = rideOrId;
@@ -1010,11 +1016,11 @@ export async function notifyWhatsAppRiderToRate(rideOrId) {
       '🧾 Your trip is complete.\nPlease rate your driver: reply with a number from *1* (worst) to *5* (best).'
     );
   } catch (e) {
-    console.warn('notifyWhatsAppRiderToRate failed:', e?.message || e);
+    logger.warn('notifyWhatsAppRiderToRate failed: %s', e?.message || e);
   }
 }
 
-/* ------------ public API ------------ */
+/* --------------- Main menu sender --------------- */
 function sendMainMenu(jid) {
   return sendText(
     jid,
@@ -1028,6 +1034,7 @@ function sendMainMenu(jid) {
   );
 }
 
+/* --------------- Lifecycle exports --------------- */
 export function initWhatsappBot() {
   if (sock || initializing) {
     console.log('WhatsApp Bot already initialized');

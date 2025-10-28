@@ -78,10 +78,10 @@ h2{margin:0 0 10px;font-size:18px}
     </div>
     <nav>
       <a href="/admin">Dashboard</a>
-      <a href="/admin/drivers">Drivers</a>
-      <!-- ✅ Added Riders link -->
+      <a href="/admin/drivers"><b>Drivers</b></a>
       <a href="/admin/riders">Riders</a>
       <a href="/admin/trips">Trips</a>
+      <a href="/admin/prebook">Prebook</a>
       <a href="/admin/drivers?status=pending">Pending Drivers</a>
       <a href="/admin/drivers?status=approved">Approved Drivers</a>
       <a href="/admin/drivers?status=rejected">Rejected Drivers</a>
@@ -161,9 +161,6 @@ h2{margin:0 0 10px;font-size:18px}
                const cashMax = effCash >= cashLimit && cashLimit > 0;
                const payMax  = effPay  >= payfastLimit && payfastLimit > 0;
 
-               const override = !!d?.tripOverride;
-               const overrideUntil = d?.tripOverrideExpiresAt ? new Date(d.tripOverrideExpiresAt) : null;
-
                const bank = d?.banking || {};
                const holder = bank.accountHolder || '';
                const bankName = bank.bankName || '';
@@ -189,7 +186,7 @@ h2{margin:0 0 10px;font-size:18px}
                 <div><b><%= cashCount %></b> cash</div>
               </td>
 
-              <!-- Limits / Reset / Override -->
+              <!-- Limits / Reset (buttons are for UI only; wire if you add endpoints) -->
               <td>
                 <div class="limitbox">
                   <div class="limitrow">
@@ -199,7 +196,6 @@ h2{margin:0 0 10px;font-size:18px}
                     <% if (cashMax) { %>
                       <span class="badge warn">MAX REACHED</span>
                     <% } %>
-                    <button class="btn small" data-action="limit-reset" data-method="cash" data-id="<%= d._id %>">Reset Cash</button>
                   </div>
                   <div class="limitrow">
                     <span class="badge <%= payMax ? 'warn' : '' %>">
@@ -208,10 +204,6 @@ h2{margin:0 0 10px;font-size:18px}
                     <% if (payMax) { %>
                       <span class="badge warn">MAX REACHED</span>
                     <% } %>
-                    <button class="btn small" data-action="limit-reset" data-method="payfast" data-id="<%= d._id %>">Reset PayFast</button>
-                  </div>
-                  <div class="limitrow">
-                    <button class="btn small primary" data-action="limit-full-reset" data-id="<%= d._id %>">Full reset</button>
                   </div>
                 </div>
               </td>
@@ -303,6 +295,48 @@ h2{margin:0 0 10px;font-size:18px}
   </div>
 </div>
 
+<!-- Email modal -->
+<div class="modal-backdrop" id="email-backdrop">
+  <div class="modal">
+    <h3>Email Drivers</h3>
+    <div class="row">
+      <label class="small">Scope</label>
+      <select id="email-scope">
+        <option value="selected">Selected drivers</option>
+        <option value="page">This page</option>
+        <option value="search">All (search filter)</option>
+      </select>
+      <div class="hint">“Selected” uses the checkboxes. “Page” uses current page. “All” uses your search + status filters.</div>
+    </div>
+    <div class="row">
+      <label class="small">Subject</label>
+      <input type="text" id="email-subj" placeholder="Subject"/>
+    </div>
+    <div class="row">
+      <label class="small">Message</label>
+      <textarea id="email-msg" placeholder="Type your message…"></textarea>
+    </div>
+    <div class="actions">
+      <button class="btn" id="email-cancel">Cancel</button>
+      <button class="btn primary" id="email-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete (bulk) modal -->
+<div class="modal-backdrop" id="del-backdrop">
+  <div class="modal">
+    <h3>Delete Selected Drivers</h3>
+    <div class="row">
+      <div class="hint">This will remove the selected drivers permanently. This cannot be undone.</div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="del-cancel">Cancel</button>
+      <button class="btn danger" id="del-confirm">Delete</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const $ = (s, r=document) => r.querySelector(s);
   const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
@@ -311,6 +345,7 @@ h2{margin:0 0 10px;font-size:18px}
   $('#sel-all')?.addEventListener('change', (e) => {
     $$('.sel').forEach(cb => cb.checked = e.target.checked);
   });
+  const collectSelectedIds = () => $$('.sel:checked').map(cb => cb.value).join(',');
 
   // ===== WhatsApp modal logic =====
   const waBackdrop = $('#wa-backdrop');
@@ -354,8 +389,6 @@ Then share live location:
     }
   });
 
-  const collectSelectedIds = () => $$('.sel:checked').map(cb => cb.value).join(',');
-
   $('#wa-send')?.addEventListener('click', async () => {
     const scope = $('#wa-scope').value || 'selected';
     const message = (msg.value || '').trim();
@@ -385,6 +418,78 @@ Then share live location:
       closeWa();
     } catch (e) {
       alert('Failed to send WhatsApp: ' + (e?.message || e));
+    }
+  });
+
+  // ===== Email modal logic =====
+  const emailBackdrop = $('#email-backdrop');
+  const openEmail = () => emailBackdrop.style.display = 'flex';
+  const closeEmail = () => emailBackdrop.style.display = 'none';
+  $('#btn-bulk-email')?.addEventListener('click', openEmail);
+  $('#email-cancel')?.addEventListener('click', closeEmail);
+  emailBackdrop?.addEventListener('click', (e)=>{ if(e.target===emailBackdrop) closeEmail(); });
+
+  $('#email-send')?.addEventListener('click', async ()=> {
+    const scope = $('#email-scope').value || 'selected';
+    const subject = ($('#email-subj').value || '').trim();
+    const message = ($('#email-msg').value || '').trim();
+    if (!subject) return alert('Subject required');
+    if (!message) return alert('Message required');
+
+    const params = new URLSearchParams(location.search);
+    const payload = {
+      mode: scope,
+      subject,
+      message,
+      selectedIds: collectSelectedIds(),
+      q: $('#q')?.value || '',
+      status: $('#status')?.value || '',
+      page: (params.get('page') || '1'),
+      limit: (params.get('limit') || '20')
+    };
+
+    try{
+      const r = await fetch('/admin/drivers/email', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      // server redirects back to /admin/drivers with ok/err
+      if (r.redirected) { location.href = r.url; return; }
+      alert('Email queued.');
+      closeEmail();
+    }catch(e){
+      alert('Failed to send email: '+(e?.message||e));
+    }
+  });
+
+  // ===== Delete (bulk) modal logic =====
+  const delBackdrop = $('#del-backdrop');
+  const openDel = () => delBackdrop.style.display = 'flex';
+  const closeDel = () => delBackdrop.style.display = 'none';
+  $('#btn-bulk-del')?.addEventListener('click', () => {
+    const selected = collectSelectedIds();
+    if (!selected) { alert('Select one or more drivers first.'); return; }
+    openDel();
+  });
+  $('#del-cancel')?.addEventListener('click', closeDel);
+  delBackdrop?.addEventListener('click', (e)=>{ if(e.target===delBackdrop) closeDel(); });
+
+  $('#del-confirm')?.addEventListener('click', async ()=> {
+    const selectedIds = collectSelectedIds();
+    if (!selectedIds) return closeDel();
+    try{
+      const r = await fetch('/admin/drivers/bulk-delete', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ selectedIds })
+      });
+      if (r.redirected) { location.href = r.url; return; }
+      alert('Delete requested.');
+      closeDel();
+      location.reload();
+    }catch(e){
+      alert('Delete failed: '+(e?.message||e));
     }
   });
 </script>

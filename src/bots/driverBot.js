@@ -280,6 +280,33 @@ async function showDriverHome(chatId) {
   } catch {}
 }
 
+/* ----------------- Atomic accept helper ----------------- */
+async function acceptRideAtomically({ chatId, rideId }) {
+  const chatNum = Number(chatId);
+  const driver = await Driver.findOne({ chatId: chatNum }).lean();
+  if (!driver) return { ok: false, reason: 'no_profile' };
+
+  // First-accept-wins: only update if still pending and unassigned
+  const updated = await Ride.findOneAndUpdate(
+    {
+      _id: rideId,
+      status: 'pending',
+      $or: [{ driverId: { $exists: false } }, { driverId: null }]
+    },
+    {
+      $set: {
+        status: 'accepted',
+        driverId: driver._id,
+        driverChatId: chatNum
+      }
+    },
+    { new: true }
+  ).lean();
+
+  if (!updated) return { ok: false, reason: 'already_taken' };
+  return { ok: true, ride: updated, driver };
+}
+
 /* ---------------- Bot init + wiring ---------------- */
 async function sendApprovalNoticeInternal(chatId) {
   await bot.sendMessage(
@@ -678,15 +705,13 @@ function wireHandlers() {
         return;
       }
 
+      // ======= ATOMIC ACCEPT =======
       if (data.startsWith('accept_')) {
         const rideId = data.replace('accept_', '');
-        const ride = await Ride.findById(rideId);
-        if (!ride) { await bot.answerCallbackQuery(query.id, { text: 'Ride not found' }); return; }
-
-        const driver = await Driver.findOne({ chatId: Number(chatId) }).lean();
-        if (!driver) { await bot.answerCallbackQuery(query.id, { text: 'Profile missing' }); return; }
 
         // Gate acceptance on vehicle completeness (can still receive requests before setup)
+        const driver = await Driver.findOne({ chatId: Number(chatId) }).lean();
+        if (!driver) { await bot.answerCallbackQuery(query.id, { text: 'Profile missing' }); return; }
         if (!vehicleComplete(driver)) {
           await bot.answerCallbackQuery(query.id, { text: 'Finish vehicle setup first' });
           await bot.sendMessage(chatId, '🚗 Let’s finish your vehicle details (for rider identification).');
@@ -694,41 +719,37 @@ function wireHandlers() {
           return;
         }
 
-        // don't override another accepted job
-        if (ride.status && ride.status !== 'pending' && ride.driverId) {
-          await bot.answerCallbackQuery(query.id, { text: 'No longer available' });
+        const result = await acceptRideAtomically({ chatId, rideId });
+        if (!result.ok) {
+          await bot.answerCallbackQuery(query.id, { text: result.reason === 'already_taken' ? 'No longer available' : 'Not allowed' });
           return;
         }
 
-        // Accept now
-        const d = await Driver.findOne({ chatId: Number(chatId) });
-        if (d && !ride.driverId) { ride.driverId = d._id; }
-        ride.status = 'accepted';
-        await ride.save();
-
-        // 🔔 Emit acceptance so the rider gets the confirmation (FIX)
-        try {
-          driverEvents.emit('ride:accepted', { driverId: chatId, rideId: ride._id });
-        } catch {}
-
+        const ride = result.ride;
         await bot.answerCallbackQuery(query.id, { text: 'Ride accepted' });
         await bot.sendMessage(chatId, '✅ You accepted the ride.');
 
-        // Show rider details to driver (no photos to driver)
+        // Show rider details to driver
         try {
           const rider = await Rider.findOne({ chatId: Number(ride.riderChatId) }).lean();
           const details = formatRiderCardForDriver({ rider, ride });
           await bot.sendMessage(chatId, details, { parse_mode: 'HTML', disable_web_page_preview: true });
         } catch {}
 
-        // 🚫 DO NOT send live trip map link here until AFTER acceptance (we are after acceptance now, so okay)
+        // Live map link AFTER acceptance
         if (PUBLIC_URL) {
-          const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(String(rideId))}`;
+          const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(String(ride._id))}`;
           const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(String(chatId))}`;
           try {
             await bot.sendMessage(chatId, `🗺️ Live trip map:\n${driverLink}\nTip: Keep Live Location ON for the trip.`);
           } catch {}
         }
+
+        // 🔔 Notify rider/system
+        try {
+          driverEvents.emit('ride:accepted', { driverId: chatId, rideId: String(ride._id) });
+        } catch {}
+
         return;
       }
 
@@ -772,43 +793,35 @@ function wireHandlers() {
 }
 
 async function handleAcceptAfterSetup(chatId, rideId) {
-  const ride = await Ride.findById(rideId);
-  if (!ride) return void bot.sendMessage(chatId, '❌ Ride not found anymore.');
-  const d = await Driver.findOne({ chatId: Number(chatId) });
-  if (!d) return void bot.sendMessage(chatId, '❌ Driver profile not found.');
-  if (ride.status && ride.status !== 'pending' && ride.driverId) {
-    await bot.sendMessage(chatId, '⚠️ That request is no longer available.');
+  // Same atomic path as inline handler
+  const result = await acceptRideAtomically({ chatId, rideId });
+  if (!result.ok) {
+    await bot.sendMessage(chatId, result.reason === 'already_taken' ? '⚠️ That request is no longer available.' : '❌ Could not accept.');
     return;
   }
-  if (!vehicleComplete(d)) {
-    await bot.sendMessage(chatId, '⚠️ Vehicle details incomplete. Please finish setup.');
-    await startVehicleWizard(chatId, d, `accept:${rideId}`);
-    return;
-  }
-  if (!ride.driverId) ride.driverId = d._id;
-  ride.status = 'accepted';
-  await ride.save();
 
-  // 🔔 Emit acceptance here as well (FIX)
-  try {
-    driverEvents.emit('ride:accepted', { driverId: chatId, rideId });
-  } catch {}
+  const ride = result.ride;
 
   await bot.sendMessage(chatId, '✅ You accepted the ride.');
 
-  // Send rider details (no photos to driver)
+  // Send rider details
   try {
     const rider = await Rider.findOne({ chatId: Number(ride.riderChatId) }).lean();
     const details = formatRiderCardForDriver({ rider, ride });
     await bot.sendMessage(chatId, details, { parse_mode: 'HTML', disable_web_page_preview: true });
   } catch {}
 
-  // Map link only AFTER acceptance (OK)
+  // Map link AFTER acceptance
   if (PUBLIC_URL) {
     const base = `${PUBLIC_URL}/track.html?rideId=${encodeURIComponent(String(rideId))}`;
     const driverLink = `${base}&as=driver&driverChatId=${encodeURIComponent(String(chatId))}`;
     try { await bot.sendMessage(chatId, `🗺️ Live trip map:\n${driverLink}`); } catch {}
   }
+
+  // 🔔 Notify rider/system
+  try {
+    driverEvents.emit('ride:accepted', { driverId: chatId, rideId: String(rideId) });
+  } catch {}
 }
 
 /* ---------------- Initialization ---------------- */
