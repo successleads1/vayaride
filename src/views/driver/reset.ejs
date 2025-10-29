@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>VayaRide • Set New Password</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --bg:#000; --card:#111; --text:#fff; --muted:#bbb; --accent:#fff; --border:#222; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;min-height:100vh;display:grid;place-items:center;padding:24px}
+    .card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px}
+    h1{margin:6px 0 8px;text-align:center;font-size:22px}
+    p.sub{margin:0 0 18px;text-align:center;color:var(--muted)}
+    label{font-size:14px;margin:12px 0 6px;display:block}
+    input{width:100%;padding:12px 14px;border-radius:8px;border:1px solid var(--border);background:#1a1a1a;color:var(--text)}
+    button{width:100%;margin-top:16px;padding:12px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#000;font-weight:700;cursor:pointer}
+    .msg{margin:8px 0 0;text-align:center;min-height:20px}
+    .ok{color:#7CFC7C}.err{color:#ff6b6b}
+    .row{display:flex;justify-content:center;gap:16px;margin-top:14px}
+    a{color:#fff;text-decoration:none;border-bottom:1px dotted #555}
+    .hint{color:#bbb;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Set New Password</h1>
+    <p class="sub">Create a strong password</p>
+
+    <% if (typeof ok !== 'undefined' && ok) { %>
+      <div class="msg ok"><%= ok %></div>
+    <% } else if (typeof err !== 'undefined' && err) { %>
+      <div class="msg err"><%= err %></div>
+    <% } else { %>
+      <div class="msg"></div>
+    <% } %>
+
+    <form method="POST" action="/driver/reset/<%= token %>">
+      <label for="password">New password</label>
+      <input id="password" name="password" type="password" required placeholder="********" />
+      <p class="hint">Min 8 chars, upper, lower, number & special — no spaces.</p>
+
+      <label for="confirm">Confirm password</label>
+      <input id="confirm" name="confirm" type="password" required placeholder="********" />
+
+      <button type="submit">Save new password</button>
+    </form>
+
+    <div class="row">
+      <a href="/driver/login">Back to login</a>
+    </div>
+  </div>
+</body>
+</html>

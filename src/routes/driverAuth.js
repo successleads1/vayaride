@@ -1,4 +1,3 @@
-// src/routes/driverAuth.js
 import express from 'express';
 import bcrypt from 'bcrypt';
 import passport from 'passport';
@@ -6,8 +5,10 @@ import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import stream from 'stream';
 import sharp from 'sharp';
+import crypto from 'crypto';
+
 import Driver from '../models/Driver.js';
-import { sendDriverWelcomeEmail, sendAdminNewDriverAlert } from '../services/mailer.js';
+import { sendDriverWelcomeEmail, sendAdminNewDriverAlert, sendDriverPasswordResetEmail } from '../services/mailer.js';
 
 /* ---------- Cloudinary ---------- */
 cloudinary.config({
@@ -44,7 +45,7 @@ const getPublicUrl = (req) =>
 
 function renderError(res, view, msg, extras = {}) {
   const status = extras.statusCode || 400;
-  const payload = { error: msg, ...extras };
+  const payload = { error: msg, err: msg, ok: '', ...extras };
   return res.status(status).render(view, payload);
 }
 
@@ -97,16 +98,13 @@ const DOC_FIELDS = [
   { name: 'idDocument',           maxCount: 1 },
   { name: 'vehicleRegistration',  maxCount: 1 },
   { name: 'driversLicense',       maxCount: 1 },
-  // { name: 'insuranceCertificate', maxCount: 1 }, // hidden
   { name: 'pdpOrPsv',             maxCount: 1 },
-  // { name: 'dekraCertificate',     maxCount: 1 }, // hidden
   { name: 'policeClearance',      maxCount: 1 },
   { name: 'licenseDisc',          maxCount: 1 }
 ];
 const DOC_KEYS = [
   'driverProfilePhoto','vehiclePhoto','idDocument','vehicleRegistration',
-  'driversLicense',/*'insuranceCertificate',*/'pdpOrPsv',/*'dekraCertificate',*/
-  'policeClearance','licenseDisc'
+  'driversLicense','pdpOrPsv','policeClearance','licenseDisc'
 ];
 
 /* ---------- Router ---------- */
@@ -211,12 +209,7 @@ router.post('/register', ensureGuest, async (req, res) => {
       }
     }
 
-    // 🔎 explicit mail log before sending
-    console.log('[MAIL] about to send driver welcome & admin alert for', emailRaw);
-
-    try {
-      await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw });
-    } catch (e) {
+    try { await sendDriverWelcomeEmail(emailRaw, { name: nameRaw, vehicleType: vehicleTypeRaw }); } catch (e) {
       console.error('Welcome email failed:', e?.message || e);
     }
     try {
@@ -226,7 +219,7 @@ router.post('/register', ensureGuest, async (req, res) => {
         phone: phoneE164,
         vehicleType: vehicleTypeRaw,
         createdAt: created?.createdAt || new Date(),
-        dashboardUrl: `${publicUrl.replace(/\/$/, '')}/admin/drivers?highlight=${encodeURIComponent(created._id.toString())}`
+        dashboardUrl: `${getPublicUrl(req).replace(/\/$/, '')}/admin/drivers?highlight=${encodeURIComponent(created._id.toString())}`
       });
     } catch (e) {
       console.error('Admin alert failed:', e?.message || e);
@@ -268,7 +261,8 @@ router.post('/register', ensureGuest, async (req, res) => {
 router.get('/login', ensureGuest, (req, res) => {
   res.render('driver/login', {
     email: req.query.email || '',
-    publicUrl: getPublicUrl(req)
+    publicUrl: getPublicUrl(req),
+    error: null
   });
 });
 
@@ -278,6 +272,122 @@ router.post(
   passport.authenticate('local-driver', { failureRedirect: '/driver/login' }),
   (req, res) => res.redirect('/driver')
 );
+
+/* ---------------- Forgot / Reset (NEW) ---------------- */
+
+// Show "forgot password" page
+router.get('/forgot', ensureGuest, (req, res) => {
+  res.render('driver/forgot', { ok: '', err: '' });
+});
+
+// Handle email submission
+router.post('/forgot', ensureGuest, async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!email) return res.render('driver/forgot', { ok: '', err: 'Email is required' });
+
+    const driver = await Driver.findOne({ email }).select('_id email name');
+    // To avoid account enumeration, always show success
+    const publicUrl = getPublicUrl(req);
+
+    if (driver) {
+      // Create secure random token, hash before storing
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const expires = new Date(Date.now() + 60 * 60 * 1000); // 60 min
+
+      await Driver.updateOne(
+        { _id: driver._id },
+        { $set: { resetPasswordTokenHash: tokenHash, resetPasswordExpiresAt: expires } }
+      );
+
+      const resetLink = `${publicUrl.replace(/\/$/, '')}/driver/reset/${rawToken}`;
+      try {
+        await sendDriverPasswordResetEmail(email, { name: driver.name || 'Driver', resetLink });
+      } catch (e) {
+        console.error('Reset mail send failed:', e?.message || e);
+        // Still continue to not leak info
+      }
+    }
+
+    return res.render('driver/forgot', {
+      ok: 'If that email exists, a reset link has been sent.',
+      err: ''
+    });
+  } catch (e) {
+    console.error('POST /driver/forgot error:', e);
+    return res.render('driver/forgot', { ok: '', err: 'Server error' });
+  }
+});
+
+// Show "set new password" page
+router.get('/reset/:token', ensureGuest, async (req, res) => {
+  try {
+    const rawToken = String(req.params.token || '');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    const driver = await Driver.findOne({
+      resetPasswordTokenHash: tokenHash,
+      resetPasswordExpiresAt: { $gt: new Date() }
+    }).select('_id');
+
+    if (!driver) {
+      return res.render('driver/forgot', { ok: '', err: 'Reset link is invalid or has expired.' });
+    }
+
+    return res.render('driver/reset', { token: rawToken, ok: '', err: '' });
+  } catch (e) {
+    console.error('GET /driver/reset/:token error:', e);
+    return res.render('driver/forgot', { ok: '', err: 'Server error' });
+  }
+});
+
+// Handle new password submission
+router.post('/reset/:token', ensureGuest, async (req, res) => {
+  try {
+    const rawToken = String(req.params.token || '');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    const driver = await Driver.findOne({
+      resetPasswordTokenHash: tokenHash,
+      resetPasswordExpiresAt: { $gt: new Date() }
+    });
+
+    if (!driver) {
+      return res.render('driver/forgot', { ok: '', err: 'Reset link is invalid or has expired.' });
+    }
+
+    const password = String(req.body.password || '');
+    const confirm  = String(req.body.confirm || '');
+    if (!password || !confirm) {
+      return res.render('driver/reset', { token: rawToken, ok: '', err: 'Please enter and confirm your new password.' });
+    }
+    if (password !== confirm) {
+      return res.render('driver/reset', { token: rawToken, ok: '', err: 'Passwords do not match.' });
+    }
+    if (!isStrongPassword(password)) {
+      return res.render('driver/reset', {
+        token: rawToken,
+        ok: '',
+        err: 'Password must be 8+ chars with upper, lower, number & special (no spaces).'
+      });
+    }
+
+    driver.passwordHash = await bcrypt.hash(password, 12);
+    driver.resetPasswordTokenHash = undefined;
+    driver.resetPasswordExpiresAt = undefined;
+    await driver.save();
+
+    return res.render('driver/login', {
+      email: driver.email || '',
+      publicUrl: getPublicUrl(req),
+      error: null
+    });
+  } catch (e) {
+    console.error('POST /driver/reset/:token error:', e);
+    return res.render('driver/forgot', { ok: '', err: 'Server error' });
+  }
+});
 
 /* ---------------- Upload Docs ---------------- */
 router.get('/upload-docs', ensureAuth, (req, res) => res.redirect('/driver#docsForm'));
@@ -399,7 +509,6 @@ router.post('/banking', ensureAuth, async (req, res) => {
       swift:         String(req.body.swift || '').trim().toUpperCase()
     };
 
-    // Basic validation
     if (!fields.accountHolder || !fields.bankName || !fields.accountType || !fields.accountNumber || !fields.branchCode) {
       return res.redirect('/driver?err=' + encodeURIComponent('Please complete all required banking fields.'));
     }

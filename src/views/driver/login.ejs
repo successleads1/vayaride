@@ -16,7 +16,7 @@
     input{width:100%;padding:12px 14px;border-radius:8px;border:1px solid var(--border);background:#1a1a1a;color:var(--text)}
     button{width:100%;margin-top:16px;padding:12px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#000;font-weight:700;cursor:pointer}
     button:hover{filter:brightness(0.9)}
-    .row{display:flex;justify-content:space-between;gap:12px;margin-top:14px}
+    .row{display:flex;justify-content:space-between;gap:12px;margin-top:14px;flex-wrap:wrap}
     a{color:#fff;text-decoration:none;border-bottom:1px dotted #555}
     .msg{margin:8px 0 0;color:#ff6b6b;text-align:center;min-height:20px}
     .footer{margin-top:18px;text-align:center;color:var(--muted);font-size:13px}
@@ -42,8 +42,10 @@
       <button type="submit">Sign in</button>
     </form>
 
+    <!-- UPDATED: add Forgot password? link -->
     <div class="row">
       <a href="/driver/register">Create account</a>
+      <a href="/driver/forgot">Forgot password?</a>
       <a href="/">Back to home</a>
     </div>
 
