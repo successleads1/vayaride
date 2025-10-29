@@ -1,10 +1,11 @@
 // src/bots/whatsappBot.js
 // VayaRide – WhatsApp Rider Bot (Baileys / ESM)
+// Number-first UX everywhere (menus, confirmations, choices)
 // Feature parity with Telegram rider bot:
 // - First-time registration (name → email → phone infer/prompt)
 // - Main menu (Book / Prebook / Profile / Support / Driver)
 // - Address entry via text (Google Places, ZA-scoped) or location share
-// - Confirm/correct pickup & destination
+// - Confirm/correct pickup & destination with numeric options
 // - Quotes via pricing.getAvailableVehicleQuotes → vehicle select
 // - Payment select (Cash / PayFast) BEFORE driver assignment
 // - Secure dashboard link (token + 4-digit PIN, 10-minute expiry)
@@ -241,10 +242,10 @@ State shape (per jid):
          'reg_name' | 'reg_email' | 'reg_phone' |
          'booking_pickup' | 'booking_pickup_confirm' |
          'booking_destination' | 'booking_destination_confirm' |
-         'review_trip' | 'await_vehicle' | 'await_payment' | 'waiting_driver' |
+         'review_trip' | 'await_vehicle' | 'await_payment' |
          'prebook_pickup' | 'prebook_pickup_confirm' |
          'prebook_destination' | 'prebook_destination_confirm' |
-         'prebook_when' | 'prebook_review' | 'prebook_await_vehicle' | 'prebook_await_payment' | 'prebook_waiting_driver',
+         'prebook_when' | 'prebook_review' | 'prebook_await_vehicle' | 'prebook_await_payment',
   pickup, destination,
   suggestions: [],
   chosenVehicle, price,
@@ -431,7 +432,7 @@ async function setupClient() {
       if (qr) {
         currentQR = qr;
         if (process.env.WA_SHOW_QR === '1') {
-          try { console.log('\n' + await qrcode.toString(qr, { type: 'terminal', small: true })); }
+          try { console.log('\n' + (await qrcode.toString(qr, { type: 'terminal', small: true }))); }
           catch { console.log('Open /qrcode to scan via browser.'); }
         }
         try {
@@ -540,8 +541,17 @@ function carPretty(driver) {
 const toMap = ({ lat, lng }) => `https://maps.google.com/?q=${lat},${lng}`;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Message Handlers – TEXT
+   Message Handlers – TEXT (NUMBER-FIRST UX)
 ──────────────────────────────────────────────────────────────────────────── */
+function isYes(numOrText) {
+  const s = String(numOrText).trim().toLowerCase();
+  return s === '1' || ['yes','y','ok','okay','confirm'].includes(s);
+}
+function isNo(numOrText) {
+  const s = String(numOrText).trim().toLowerCase();
+  return s === '2' || ['no','n','change','edit','correct'].includes(s);
+}
+
 async function handleTextMessage(jid, raw) {
   if (!raw) return;
   const txt = (raw || '').trim();
@@ -591,7 +601,7 @@ async function handleTextMessage(jid, raw) {
 
   // First time / greetings → registration
   if ((!hasName || !hasEmail) &&
-      (['/start','start','hi','hello','menu'].includes(lc) || state.stage === 'idle')) {
+      (['/start','start','hi','hello','menu','1','2','3','4','5'].includes(lc) || state.stage === 'idle')) {
     convo.set(jid, { stage: 'reg_name', temp: {} });
     await sendText(jid, '👋 Welcome! Please enter your *full name* to register:');
     return;
@@ -669,7 +679,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Ratings quick path
+  // Ratings quick path (1–5)
   const pendingRate = ratingAwait.get(jid);
   if (pendingRate && /^[1-5]$/.test(lc)) {
     const stars = Number(lc);
@@ -735,16 +745,15 @@ async function handleTextMessage(jid, raw) {
       await sendText(
         jid,
         `🧑‍✈️ *Driver Portal*\n` +
-        `Are you already registered?\n\n` +
-        `1) No — registration link\n` +
-        `2) Yes — dashboard/status link\n` +
-        `Type *1* or *2*.`
+        `1) Register (new driver)\n` +
+        `2) Dashboard / Status (existing)\n` +
+        `Reply with *1* or *2*.`
       );
       return;
     }
   }
 
-  // DRIVER SUB-MENU
+  // DRIVER SUB-MENU (numbers only, with word fallback)
   if (state.stage === 'driver_menu') {
     if (lc === '1' || lc === 'no' || lc === 'not registered') {
       await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
@@ -779,7 +788,12 @@ async function handleTextMessage(jid, raw) {
     state.suggestions = sugs;
     state.stage = 'booking_pickup';
     convo.set(jid, state);
-    await sendText(jid, '📍 *Pickup suggestions (ZA):*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice, or type a new address.');
+    await sendText(
+      jid,
+      '📍 *Pickup suggestions (ZA):*\n' +
+      formatSuggestionList(sugs) +
+      '\n\nReply with the *number* of your choice, or type a new address.'
+    );
     return;
   }
 
@@ -796,7 +810,14 @@ async function handleTextMessage(jid, raw) {
       state.suggestions = [];
       state.stage = 'booking_pickup_confirm';
       convo.set(jid, state);
-      await sendText(jid, `📍 Pickup set to:\n${det.address}\n\nReply *yes* to confirm, or *change* to correct.`);
+      await sendText(
+        jid,
+        `📍 Pickup set to:\n${det.address}\n\n` +
+        `Confirm pickup:\n` +
+        `1) Confirm\n` +
+        `2) Change\n` +
+        `Reply with *1* or *2*.`
+      );
       return;
     } catch {
       await sendText(jid, '⚠️ Failed to fetch that place. Type the pickup address again.');
@@ -804,15 +825,15 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // Confirm/correct pickup
+  // Confirm/correct pickup (1 confirm, 2 change)
   if (state.stage === 'booking_pickup_confirm') {
-    if (['yes','y','confirm','ok','okay'].includes(lc)) {
+    if (isYes(lc)) {
       state.stage = 'booking_destination';
       convo.set(jid, state);
       await sendText(jid, `🎯 Now send your *destination* — share location (📎) or type address for suggestions.`);
       return;
     }
-    if (['change','edit','correct','no'].includes(lc)) {
+    if (isNo(lc)) {
       state.stage = 'booking_pickup';
       state.pickup = undefined;
       state.suggestions = [];
@@ -820,7 +841,7 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Okay, send your *pickup* again (location or type address).`);
       return;
     }
-    await sendText(jid, `Reply *yes* to confirm pickup, or *change* to correct it.`);
+    await sendText(jid, `Choose:\n1) Confirm\n2) Change`);
     return;
   }
 
@@ -840,7 +861,12 @@ async function handleTextMessage(jid, raw) {
     }
     state.suggestions = sugs;
     convo.set(jid, state);
-    await sendText(jid, '🎯 *Destination suggestions (ZA):*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice, or type a new address.');
+    await sendText(
+      jid,
+      '🎯 *Destination suggestions (ZA):*\n' +
+      formatSuggestionList(sugs) +
+      '\n\nReply with the *number* of your choice, or type a new address.'
+    );
     return;
   }
 
@@ -857,7 +883,14 @@ async function handleTextMessage(jid, raw) {
       state.suggestions = [];
       state.stage = 'booking_destination_confirm';
       convo.set(jid, state);
-      await sendText(jid, `🎯 Destination set to:\n${det.address}\n\nReply *yes* to confirm, or *change* to correct.`);
+      await sendText(
+        jid,
+        `🎯 Destination set to:\n${det.address}\n\n` +
+        `Confirm destination:\n` +
+        `1) Confirm\n` +
+        `2) Change\n` +
+        `Reply with *1* or *2*.`
+      );
       return;
     } catch {
       await sendText(jid, '⚠️ Failed to fetch that place. Type the destination address again.');
@@ -865,26 +898,29 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // Confirm/correct destination
+  // Confirm/correct destination (1 confirm, 2 change)
   if (state.stage === 'booking_destination_confirm') {
-    if (['yes','y','confirm','ok','okay'].includes(lc)) {
+    if (isYes(lc)) {
       // Review trip
       state.stage = 'review_trip';
       convo.set(jid, state);
       const p = state.pickup?.address || `${state.pickup?.lat?.toFixed(5)}, ${state.pickup?.lng?.toFixed(5)}`;
       const d = state.destination?.address || `${state.destination?.lat?.toFixed(5)}, ${state.destination?.lng?.toFixed(5)}`;
-      await sendText(jid,
+      await sendText(
+        jid,
         `🧭 *Review trip*\n` +
         `• Pickup: ${p}\n` +
         `• Destination: ${d}\n\n` +
-        `Reply *proceed* to see options, or:\n` +
-        `• *fix pickup*  — reselect pickup\n` +
-        `• *fix drop*    — reselect destination\n` +
-        `• *cancel*      — cancel booking`
+        `Choose:\n` +
+        `1) Proceed\n` +
+        `2) Fix pickup\n` +
+        `3) Fix destination\n` +
+        `4) Cancel\n` +
+        `Reply with *1–4*.`
       );
       return;
     }
-    if (['change','edit','correct','no'].includes(lc)) {
+    if (isNo(lc)) {
       state.stage = 'booking_destination';
       state.destination = undefined;
       state.suggestions = [];
@@ -892,13 +928,13 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Okay, send your *destination* again (location or type address).`);
       return;
     }
-    await sendText(jid, `Reply *yes* to confirm destination, or *change* to correct it.`);
+    await sendText(jid, `Choose:\n1) Confirm\n2) Change`);
     return;
   }
 
-  // Review actions
+  // Review actions (1 proceed, 2 fix pickup, 3 fix drop, 4 cancel)
   if (state.stage === 'review_trip') {
-    if (lc === 'fix pickup') {
+    if (lc === '2' || lc === 'fix pickup') {
       state.stage = 'booking_pickup';
       state.pickup = undefined;
       state.suggestions = [];
@@ -906,7 +942,7 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Okay, send your *pickup* again (location or type address).`);
       return;
     }
-    if (lc === 'fix drop' || lc === 'fix destination') {
+    if (lc === '3' || lc === 'fix drop' || lc === 'fix destination') {
       state.stage = 'booking_destination';
       state.destination = undefined;
       state.suggestions = [];
@@ -914,13 +950,13 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Okay, send your *destination* again (location or type address).`);
       return;
     }
-    if (lc === 'cancel') {
+    if (lc === '4' || lc === 'cancel') {
       resetFlow(jid);
       await sendText(jid, `❌ Booking cancelled.`);
       await sendMainMenu(jid);
       return;
     }
-    if (lc === 'proceed') {
+    if (lc === '1' || lc === 'proceed') {
       try {
         const quotes = await getAvailableVehicleQuotes({
           pickup: state.pickup,
@@ -941,7 +977,8 @@ async function handleTextMessage(jid, raw) {
         const lines = quotes.map((q, i) =>
           `${i + 1}) ${vtLabel(q.vehicleType)} — R${q.price}${q.driverCount ? ` (drivers: ${q.driverCount})` : ''}`
         );
-        await sendText(jid,
+        await sendText(
+          jid,
           '🚘 Select your ride (based on nearby drivers and live pricing):\n' +
           lines.join('\n') +
           '\n\nReply with the *number* of your choice.'
@@ -952,11 +989,11 @@ async function handleTextMessage(jid, raw) {
         return;
       }
     }
-    await sendText(jid, `Reply *proceed*, or *fix pickup*, *fix drop*, or *cancel*.`);
+    await sendText(jid, `Reply with *1–4*:\n1) Proceed  2) Fix pickup  3) Fix destination  4) Cancel`);
     return;
   }
 
-  // Vehicle select
+  // Vehicle select (numbers)
   if (state.stage === 'await_vehicle' && /^\d{1,2}$/.test(lc)) {
     const idx = Number(lc) - 1;
     const q = state.quotes?.[idx];
@@ -997,7 +1034,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Payment choice
+  // Payment choice (1 cash, 2 card)
   if (state.stage === 'await_payment') {
     if (lc === '1' || lc === 'cash') {
       const ride = await Ride.findById(state.rideId);
@@ -1027,7 +1064,7 @@ async function handleTextMessage(jid, raw) {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // PREBOOK FLOW (simple scheduled datetime capture)
+  // PREBOOK FLOW (scheduled)
   // ────────────────────────────────────────────────────────────────────────────
   if (state.stage === 'prebook_pickup' && txt.length >= 2) {
     if (!GOOGLE_MAPS_API_KEY) { await sendText(jid, '⚠️ Address search unavailable. Please share your pickup using the 📎 attachment.'); return; }
@@ -1036,7 +1073,11 @@ async function handleTextMessage(jid, raw) {
     if (!sugs.length) { await sendText(jid, 'No matches found (ZA). Try another address, or share your location (📎).'); return; }
     state.suggestions = sugs;
     convo.set(jid, state);
-    await sendText(jid, '📍 *Pickup suggestions (ZA):*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice, or type a new address.');
+    await sendText(
+      jid,
+      '📍 *Pickup suggestions (ZA):*\n' + formatSuggestionList(sugs) +
+      '\n\nReply with the *number* of your choice, or type a new address.'
+    );
     return;
   }
   if (state.stage === 'prebook_pickup' && /^\d{1,2}$/.test(lc) && state.suggestions?.length) {
@@ -1051,7 +1092,14 @@ async function handleTextMessage(jid, raw) {
       state.suggestions = [];
       state.stage = 'prebook_pickup_confirm';
       convo.set(jid, state);
-      await sendText(jid, `📍 Pickup set:\n${det.address}\n\nReply *yes* to confirm, or *change*.`);
+      await sendText(
+        jid,
+        `📍 Pickup set:\n${det.address}\n\n` +
+        `Confirm pickup:\n` +
+        `1) Confirm\n` +
+        `2) Change\n` +
+        `Reply with *1* or *2*.`
+      );
       return;
     } catch {
       await sendText(jid, '⚠️ Failed to fetch that place. Type the pickup address again.');
@@ -1059,13 +1107,13 @@ async function handleTextMessage(jid, raw) {
     }
   }
   if (state.stage === 'prebook_pickup_confirm') {
-    if (['yes','y','confirm','ok'].includes(lc)) {
+    if (isYes(lc)) {
       state.stage = 'prebook_destination';
       convo.set(jid, state);
       await sendText(jid, `🎯 Now send your *destination* (location or type address).`);
       return;
     }
-    if (['change','edit','correct','no'].includes(lc)) {
+    if (isNo(lc)) {
       state.stage = 'prebook_pickup';
       state.pickup = undefined;
       state.suggestions = [];
@@ -1073,7 +1121,7 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Send your pickup again.`);
       return;
     }
-    await sendText(jid, `Reply *yes* to confirm pickup, or *change* to correct.`);
+    await sendText(jid, `Choose:\n1) Confirm\n2) Change`);
     return;
   }
 
@@ -1084,7 +1132,11 @@ async function handleTextMessage(jid, raw) {
     if (!sugs.length) { await sendText(jid, 'No matches found (ZA). Try another address, or share your location (📎).'); return; }
     state.suggestions = sugs;
     convo.set(jid, state);
-    await sendText(jid, '🎯 *Destination suggestions (ZA):*\n' + formatSuggestionList(sugs) + '\n\nReply with the *number* of your choice, or type a new address.');
+    await sendText(
+      jid,
+      '🎯 *Destination suggestions (ZA):*\n' + formatSuggestionList(sugs) +
+      '\n\nReply with the *number* of your choice, or type a new address.'
+    );
     return;
   }
   if (state.stage === 'prebook_destination' && /^\d{1,2}$/.test(lc) && state.suggestions?.length) {
@@ -1099,7 +1151,14 @@ async function handleTextMessage(jid, raw) {
       state.suggestions = [];
       state.stage = 'prebook_destination_confirm';
       convo.set(jid, state);
-      await sendText(jid, `🎯 Destination set:\n${det.address}\n\nReply *yes* to confirm, or *change*.`);
+      await sendText(
+        jid,
+        `🎯 Destination set:\n${det.address}\n\n` +
+        `Confirm destination:\n` +
+        `1) Confirm\n` +
+        `2) Change\n` +
+        `Reply with *1* or *2*.`
+      );
       return;
     } catch {
       await sendText(jid, '⚠️ Failed to fetch that place. Type the destination address again.');
@@ -1107,13 +1166,13 @@ async function handleTextMessage(jid, raw) {
     }
   }
   if (state.stage === 'prebook_destination_confirm') {
-    if (['yes','y','confirm','ok'].includes(lc)) {
+    if (isYes(lc)) {
       state.stage = 'prebook_when';
       convo.set(jid, state);
       await sendText(jid, `🗓️ When? Reply with *YYYY-MM-DD HH:MM* (24h, local time). Example: 2025-10-30 08:30`);
       return;
     }
-    if (['change','edit','correct','no'].includes(lc)) {
+    if (isNo(lc)) {
       state.stage = 'prebook_destination';
       state.destination = undefined;
       state.suggestions = [];
@@ -1121,7 +1180,7 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Send your destination again.`);
       return;
     }
-    await sendText(jid, `Reply *yes* to confirm destination, or *change* to correct.`);
+    await sendText(jid, `Choose:\n1) Confirm\n2) Change`);
     return;
   }
 
@@ -1148,13 +1207,19 @@ async function handleTextMessage(jid, raw) {
       `• Pickup: ${state.pickup?.address}\n` +
       `• Destination: ${state.destination?.address}\n` +
       `• When: ${scheduledAt.toLocaleString()}\n\n` +
-      `Reply *proceed* to see options, or *fix pickup*, *fix drop*, *change time*, or *cancel*.`
+      `Choose:\n` +
+      `1) Proceed\n` +
+      `2) Fix pickup\n` +
+      `3) Fix destination\n` +
+      `4) Change time\n` +
+      `5) Cancel\n` +
+      `Reply with *1–5*.`
     );
     return;
   }
 
   if (state.stage === 'prebook_review') {
-    if (lc === 'fix pickup') {
+    if (lc === '2' || lc === 'fix pickup') {
       state.stage = 'prebook_pickup';
       state.pickup = undefined;
       state.suggestions = [];
@@ -1162,7 +1227,7 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Send your *pickup* again.`);
       return;
     }
-    if (lc === 'fix drop' || lc === 'fix destination') {
+    if (lc === '3' || lc === 'fix drop' || lc === 'fix destination') {
       state.stage = 'prebook_destination';
       state.destination = undefined;
       state.suggestions = [];
@@ -1170,19 +1235,19 @@ async function handleTextMessage(jid, raw) {
       await sendText(jid, `✏️ Send your *destination* again.`);
       return;
     }
-    if (lc === 'change time') {
+    if (lc === '4' || lc === 'change time') {
       state.stage = 'prebook_when';
       convo.set(jid, state);
       await sendText(jid, `🗓️ Reply with *YYYY-MM-DD HH:MM* (24h).`);
       return;
     }
-    if (lc === 'cancel') {
+    if (lc === '5' || lc === 'cancel') {
       resetFlow(jid);
       await sendText(jid, `❌ Prebooking cancelled.`);
       await sendMainMenu(jid);
       return;
     }
-    if (lc === 'proceed') {
+    if (lc === '1' || lc === 'proceed') {
       try {
         const quotes = await getAvailableVehicleQuotes({
           pickup: state.pickup,
@@ -1203,7 +1268,8 @@ async function handleTextMessage(jid, raw) {
         const lines = quotes.map((q, i) =>
           `${i + 1}) ${vtLabel(q.vehicleType)} — R${q.price}${q.driverCount ? ` (drivers: ${q.driverCount})` : ''}`
         );
-        await sendText(jid,
+        await sendText(
+          jid,
           '🚘 Select your ride for the *scheduled* trip:\n' +
           lines.join('\n') +
           '\n\nReply with the *number* of your choice.'
@@ -1214,7 +1280,7 @@ async function handleTextMessage(jid, raw) {
         return;
       }
     }
-    await sendText(jid, `Reply *proceed*, or *fix pickup*, *fix drop*, *change time*, or *cancel*.`);
+    await sendText(jid, `Reply with *1–5*:\n1) Proceed  2) Fix pickup  3) Fix destination  4) Change time  5) Cancel`);
     return;
   }
 
@@ -1316,7 +1382,14 @@ async function handleLocationMessage(jid, locationMessage) {
     state.suggestions = [];
     state.stage = 'booking_pickup_confirm';
     convo.set(jid, state);
-    await sendText(jid, `📍 Pickup received.\n\nReply *yes* to confirm, or *change* to correct.`);
+    await sendText(
+      jid,
+      `📍 Pickup received.\n\n` +
+      `Confirm pickup:\n` +
+      `1) Confirm\n` +
+      `2) Change\n` +
+      `Reply with *1* or *2*.`
+    );
     return;
   }
 
@@ -1326,7 +1399,14 @@ async function handleLocationMessage(jid, locationMessage) {
     state.suggestions = [];
     state.stage = 'booking_destination_confirm';
     convo.set(jid, state);
-    await sendText(jid, `🎯 Destination received.\n\nReply *yes* to confirm, or *change* to correct.`);
+    await sendText(
+      jid,
+      `🎯 Destination received.\n\n` +
+      `Confirm destination:\n` +
+      `1) Confirm\n` +
+      `2) Change\n` +
+      `Reply with *1* or *2*.`
+    );
     return;
   }
 
@@ -1336,7 +1416,14 @@ async function handleLocationMessage(jid, locationMessage) {
     state.suggestions = [];
     state.stage = 'prebook_pickup_confirm';
     convo.set(jid, state);
-    await sendText(jid, `📍 Pickup received for prebook.\n\nReply *yes* to confirm, or *change* to correct.`);
+    await sendText(
+      jid,
+      `📍 Pickup received for prebook.\n\n` +
+      `Confirm pickup:\n` +
+      `1) Confirm\n` +
+      `2) Change\n` +
+      `Reply with *1* or *2*.`
+    );
     return;
   }
 
@@ -1346,7 +1433,14 @@ async function handleLocationMessage(jid, locationMessage) {
     state.suggestions = [];
     state.stage = 'prebook_destination_confirm';
     convo.set(jid, state);
-    await sendText(jid, `🎯 Destination received for prebook.\n\nReply *yes* to confirm, or *change* to correct.`);
+    await sendText(
+      jid,
+      `🎯 Destination received for prebook.\n\n` +
+      `Confirm destination:\n` +
+      `1) Confirm\n` +
+      `2) Change\n` +
+      `Reply with *1* or *2*.`
+    );
     return;
   }
 }
