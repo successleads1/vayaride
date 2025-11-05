@@ -124,6 +124,54 @@ const ratingAwait = new Map();   // jid -> rideId
 const pendingRefByJid = new Map(); // jid -> referral code
 
 /* ────────────────────────────────────────────────────────────────────────────
+   Ride event dedupe (avoid double WA sends per ride/event)
+──────────────────────────────────────────────────────────────────────────── */
+const rideEventDedupe = {
+  accepted: new Map(),   // rideId -> ts
+  arrived:  new Map(),
+  started:  new Map(),
+  cancelled: new Map(),
+};
+
+function shouldSendRideEvent(kind, rideId, minIntervalMs = 5000) {
+  if (!rideId || !rideEventDedupe[kind]) return true;
+  const map = rideEventDedupe[kind];
+  const id = String(rideId);
+  const now = Date.now();
+  const last = map.get(id) || 0;
+  if (now - last < minIntervalMs) {
+    return false;
+  }
+  map.set(id, now);
+  if (map.size > 2000) {
+    const cutoff = now - 2 * minIntervalMs;
+    for (const [k, ts] of map) if (ts < cutoff) map.delete(k);
+  }
+  return true;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Inbound message dedupe (avoid handling same WA msg twice)
+──────────────────────────────────────────────────────────────────────────── */
+const HANDLED_MSG_TTL_MS = Number(process.env.WA_HANDLED_MSG_TTL_MS || 60_000);
+const _handledMessages = new Map(); // msgId -> timestamp
+
+function hasHandledMessage(msgId) {
+  if (!msgId) return false;
+  const id = String(msgId);
+  const now = Date.now();
+  const last = _handledMessages.get(id) || 0;
+  if (now - last < HANDLED_MSG_TTL_MS) return true;
+  _handledMessages.set(id, now);
+
+  if (_handledMessages.size > 5000) {
+    const cutoff = now - 2 * HANDLED_MSG_TTL_MS;
+    for (const [k, ts] of _handledMessages) if (ts < cutoff) _handledMessages.delete(k);
+  }
+  return false;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
    Regex / helpers
 ──────────────────────────────────────────────────────────────────────────── */
 const EMAIL_RE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
@@ -193,7 +241,7 @@ function purgeAuthFolder() {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Dedupe layer (avoid double sends)
+   Dedupe layer (avoid double sends of identical text)
 ──────────────────────────────────────────────────────────────────────────── */
 const DEDUPE_TTL_MS = Number(process.env.WA_DEDUPE_TTL_MS || 12000);
 const _recentSends = new Map();
@@ -480,6 +528,11 @@ async function setupClient() {
     sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const m of messages || []) {
         try {
+          const msgId = m.key?.id;
+          if (hasHandledMessage(msgId)) {
+            continue; // we've already processed this WA message
+          }
+
           const fromMe = m.key?.fromMe;
           const jid = m.key?.remoteJid;
           if (fromMe || jid === 'status@broadcast') continue;
@@ -753,7 +806,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // DRIVER SUB-MENU (numbers only, with word fallback)
+  // DRIVER SUB-MENU
   if (state.stage === 'driver_menu') {
     if (lc === '1' || lc === 'no' || lc === 'not registered') {
       await sendText(jid, `📝 *Driver Registration*\nRegister here:\n${PUBLIC_URL}/driver/register`);
@@ -825,7 +878,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // Confirm/correct pickup (1 confirm, 2 change)
+  // Confirm/correct pickup
   if (state.stage === 'booking_pickup_confirm') {
     if (isYes(lc)) {
       state.stage = 'booking_destination';
@@ -898,7 +951,7 @@ async function handleTextMessage(jid, raw) {
     }
   }
 
-  // Confirm/correct destination (1 confirm, 2 change)
+  // Confirm/correct destination
   if (state.stage === 'booking_destination_confirm') {
     if (isYes(lc)) {
       // Review trip
@@ -932,7 +985,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Review actions (1 proceed, 2 fix pickup, 3 fix drop, 4 cancel)
+  // Review actions
   if (state.stage === 'review_trip') {
     if (lc === '2' || lc === 'fix pickup') {
       state.stage = 'booking_pickup';
@@ -993,7 +1046,7 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Vehicle select (numbers)
+  // Vehicle select
   if (state.stage === 'await_vehicle' && /^\d{1,2}$/.test(lc)) {
     const idx = Number(lc) - 1;
     const q = state.quotes?.[idx];
@@ -1001,7 +1054,6 @@ async function handleTextMessage(jid, raw) {
     state.chosenVehicle = q.vehicleType;
     state.price = q.price;
 
-    // Create ride in "payment_pending" – driver assignment after payment choice
     const ride = await Ride.create({
       pickup: state.pickup,
       destination: state.destination,
@@ -1034,16 +1086,15 @@ async function handleTextMessage(jid, raw) {
     return;
   }
 
-  // Payment choice (1 cash, 2 card)
+  // Payment choice
   if (state.stage === 'await_payment') {
     if (lc === '1' || lc === 'cash') {
       const ride = await Ride.findById(state.rideId);
       if (!ride) { resetFlow(jid); await sendText(jid, '⚠️ Session expired. Type *menu* → *1* to start again.'); return; }
       ride.paymentMethod = 'cash';
-      ride.status = 'pending'; // driver can now be assigned
+      ride.status = 'pending';
       await ride.save();
 
-      // Emit to assignment flow (driver will see accept/ignore)
       riderEvents.emit('booking:new', { rideId: String(ride._id), vehicleType: state.chosenVehicle });
       await sendText(jid, '✅ Cash selected. Requesting the nearest driver for you…');
       resetFlow(jid);
@@ -1185,7 +1236,6 @@ async function handleTextMessage(jid, raw) {
   }
 
   if (state.stage === 'prebook_when') {
-    // Very simple parser for "YYYY-MM-DD HH:MM"
     const m = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/.exec(txt);
     if (!m) {
       await sendText(jid, `❌ Please use format *YYYY-MM-DD HH:MM* (24h). Example: 2025-10-30 08:30`);
@@ -1291,7 +1341,6 @@ async function handleTextMessage(jid, raw) {
     state.chosenVehicle = q.vehicleType;
     state.price = q.price;
 
-    // Create scheduled ride (status "scheduled" until the time approaches; you can have a cron to activate)
     const ride = await Ride.create({
       pickup: state.pickup,
       destination: state.destination,
@@ -1446,9 +1495,11 @@ async function handleLocationMessage(jid, locationMessage) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Driver → Rider notifications
+   Driver → Rider notifications (with ride-event dedupe)
 ──────────────────────────────────────────────────────────────────────────── */
 driverEvents.on('ride:accepted', async ({ rideId }) => {
+  if (!shouldSendRideEvent('accepted', rideId)) return;
+
   const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
 
@@ -1494,19 +1545,26 @@ driverEvents.on('ride:accepted', async ({ rideId }) => {
 });
 
 driverEvents.on('ride:arrived', async ({ rideId }) => {
+  if (!shouldSendRideEvent('arrived', rideId)) return;
+
   const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
   try { await sendText(jid, '📍 Your driver has arrived at the pickup point.'); } catch {}
 });
 
 driverEvents.on('ride:started', async ({ rideId }) => {
+  if (!shouldSendRideEvent('started', rideId)) return;
+
   const jid = await getWaJidForRideId(rideId);
   if (!jid) return;
   try { await sendText(jid, '▶️ Your trip has started. Enjoy the ride!'); } catch {}
 });
 
 driverEvents.on('ride:cancelled', async ({ ride }) => {
-  const jid = ride?.riderWaJid || (ride?._id ? await getWaJidForRideId(ride._id) : null);
+  const rideId = ride?._id;
+  if (!shouldSendRideEvent('cancelled', rideId)) return;
+
+  const jid = ride?.riderWaJid || (rideId ? await getWaJidForRideId(rideId) : null);
   if (!jid) return;
   try { await sendText(jid, '❌ The driver cancelled the trip. Please try booking again.'); } catch {}
 });
