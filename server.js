@@ -44,7 +44,7 @@ import {
   waitForQrDataUrl,
   isWhatsAppConnected,
   getConnectionStatus,
-  sendWhatsAppMessage,
+  // sendWhatsAppMessage, // no longer used here for ride events
   resetWhatsAppSession,
 } from './src/bots/whatsappBot.js';
 
@@ -900,13 +900,7 @@ driverEvents.on('ride:accepted', async ({ driverId, rideId }) => {
         );
     } catch {}
 
-    try {
-      if (ride.riderWaJid)
-        await sendWhatsAppMessage(
-          ride.riderWaJid,
-          `🚗 Your ride is on the way.\nDriver: ${driverContact.name}${driverContact.phone ? ` (${driverContact.phone})` : ''}\nTrack: ${riderLink}`
-        );
-    } catch {}
+    // WhatsApp rider notification for accepted is handled in whatsappBot.js
 
     try {
       await DB.sendMessage(
@@ -929,7 +923,7 @@ driverEvents.on('ride:arrived', async ({ rideId, firstTime = false }) => {
 
     if (firstTime) {
       try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, '📍 Your driver has arrived at the pickup point.'); } catch {}
-      try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, '📍 Your driver has arrived at the pickup point.'); } catch {}
+      // WhatsApp rider "arrived" message is handled in whatsappBot.js
     }
 
     io.emit(`ride:${rideId}:arrived`);
@@ -961,7 +955,7 @@ driverEvents.on('ride:started', async ({ rideId, by }) => {
     if (skipNotify) return;
 
     try { if (ride.riderChatId) await RB.sendMessage(ride.riderChatId, '▶️ Your trip has started. Enjoy the ride!'); } catch {}
-    try { if (ride.riderWaJid)  await sendWhatsAppMessage(ride.riderWaJid, '▶️ Your trip has started. Enjoy the ride!'); } catch {}
+    // WhatsApp rider "started" message is handled in whatsappBot.js
   } catch (e) {
     console.warn('ride:started handler failed:', e?.message || e);
   }
